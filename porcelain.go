@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/go-git/go-billy/v5"
 	gogit "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/cache"
@@ -17,11 +18,13 @@ import (
 )
 
 func (g *gitRun) init(args []string) error {
-	quiet, branch, dir := false, "", "."
+	quiet, bare, branch, dir := false, false, "", "."
 	for i := 0; i < len(args); i++ {
 		switch a := args[i]; {
 		case a == "-q" || a == "--quiet":
 			quiet = true
+		case a == "--bare":
+			bare = true
 		case (a == "-b" || a == "--initial-branch") && i+1 < len(args):
 			i++
 			branch = args[i]
@@ -49,13 +52,21 @@ func (g *gitRun) init(args []string) error {
 		return fatalf("cannot mkdir %s: %v", dir, err)
 	}
 	gitDir := path.Join(top, ".git")
+	if bare {
+		gitDir = top
+	}
 	verb := "Initialized empty"
 	if _, err := fs.Stat(g.fsys, fsName(path.Join(gitDir, "HEAD"))); err == nil {
 		verb = "Reinitialized existing"
 	} else {
-		dot, _ := wt.Chroot(".git")
+		dot, worktree := billy.Filesystem(nil), billy.Filesystem(wt)
+		if bare {
+			dot, worktree = wt, nil
+		} else {
+			dot, _ = wt.Chroot(".git")
+		}
 		st := filesystem.NewStorage(dot, cache.NewObjectLRUDefault())
-		_, err := gogit.InitWithOptions(st, wt, gogit.InitOptions{DefaultBranch: plumbing.NewBranchReferenceName(branch)})
+		_, err := gogit.InitWithOptions(st, worktree, gogit.InitOptions{DefaultBranch: plumbing.NewBranchReferenceName(branch)})
 		if err != nil {
 			return fatalf("%v", err)
 		}
@@ -553,7 +564,14 @@ func (g *gitRun) status(args []string) error {
 		case st.head == nil:
 			fmt.Fprintf(g.out, "## No commits yet on %s\n", st.branch)
 		default:
-			fmt.Fprintf(g.out, "## %s\n", st.branch)
+			line := "## " + st.branch
+			if t := r.tracking(st.branch); t != nil {
+				line += "..." + t.upstream
+				if s := t.counts(); s != "" {
+					line += " [" + s + "]"
+				}
+			}
+			fmt.Fprintln(g.out, line)
 		}
 	}
 	for _, f := range st.tracked {
@@ -589,6 +607,11 @@ func (r *repo) writeLongStatus(w io.Writer, st *repoStatus, forCommit bool) {
 		fmt.Fprintf(w, "HEAD detached at %s\n", short(st.head.Hash))
 	} else {
 		fmt.Fprintf(w, "On branch %s\n", st.branch)
+		if st.head != nil {
+			if t := r.tracking(st.branch); t != nil {
+				fmt.Fprintf(w, "%s\n", t.longStatus())
+			}
+		}
 	}
 	if st.head == nil {
 		if forCommit {
@@ -656,108 +679,6 @@ func (r *repo) writeLongStatus(w io.Writer, st *repoStatus, forCommit bool) {
 	default:
 		fmt.Fprintln(w, "nothing to commit, working tree clean")
 	}
-}
-
-func (g *gitRun) branch(args []string) error {
-	var del, forceDel, showCurrent bool
-	var names []string
-	for _, a := range args {
-		switch a {
-		case "-d", "--delete":
-			del = true
-		case "-D":
-			del, forceDel = true, true
-		case "--show-current":
-			showCurrent = true
-		case "-l", "--list":
-		default:
-			if strings.HasPrefix(a, "-") {
-				return usagef("error: unknown option `%s'", strings.TrimLeft(a, "-"))
-			}
-			names = append(names, a)
-		}
-	}
-	r, err := g.openRepo()
-	if err != nil {
-		return err
-	}
-	current, err := r.branchName()
-	if err != nil {
-		return err
-	}
-	switch {
-	case showCurrent:
-		if current != "" {
-			fmt.Fprintln(g.out, current)
-		}
-		return nil
-	case del:
-		if len(names) == 0 {
-			return fatalf("branch name required")
-		}
-		head, err := r.headCommit()
-		if err != nil {
-			return err
-		}
-		for _, name := range names {
-			ref, err := r.Storer.Reference(plumbing.NewBranchReferenceName(name))
-			if err != nil {
-				return failf(1, "error: branch '%s' not found\n", name)
-			}
-			if name == current {
-				return failf(1, "error: cannot delete branch '%s' used by worktree at '%s'\n", name, r.top)
-			}
-			if !forceDel {
-				tip, err := r.CommitObject(ref.Hash())
-				if err != nil {
-					return err
-				}
-				merged := head != nil && (tip.Hash == head.Hash || mustAncestor(tip, head))
-				if !merged {
-					return failf(1, "error: the branch '%s' is not fully merged\n"+
-						"hint: If you are sure you want to delete it, run 'git branch -D %s'\n"+
-						"hint: Disable this message with \"git config set advice.forceDeleteBranch false\"\n", name, name)
-				}
-			}
-			if err := r.Storer.RemoveReference(ref.Name()); err != nil {
-				return err
-			}
-			fmt.Fprintf(g.out, "Deleted branch %s (was %s).\n", name, short(ref.Hash()))
-		}
-		return nil
-	case len(names) > 0:
-		if len(names) > 2 {
-			return usagef("usage: git branch <name> [<start-point>]")
-		}
-		start := "HEAD"
-		if len(names) == 2 {
-			start = names[1]
-		}
-		return r.createBranch(names[0], start)
-	}
-	iter, err := r.Branches()
-	if err != nil {
-		return err
-	}
-	var branches []string
-	iter.ForEach(func(ref *plumbing.Reference) error {
-		branches = append(branches, ref.Name().Short())
-		return nil
-	})
-	sort.Strings(branches)
-	if current == "" {
-		if head, err := r.headCommit(); err == nil && head != nil {
-			fmt.Fprintf(g.out, "* (HEAD detached at %s)\n", short(head.Hash))
-		}
-	}
-	for _, b := range branches {
-		mark := "  "
-		if b == current {
-			mark = "* "
-		}
-		fmt.Fprintf(g.out, "%s%s\n", mark, b)
-	}
-	return nil
 }
 
 func mustAncestor(a, b *object.Commit) bool {
@@ -865,6 +786,43 @@ func (r *repo) showLocalChanges() {
 	}
 }
 
+// dwimRemote finds the single remote-tracking branch <remote>/<name>, as
+// git checkout and git switch do for a branch that exists only remotely.
+func (r *repo) dwimRemote(name string) string {
+	remotes, err := r.remotes()
+	if err != nil {
+		return ""
+	}
+	found := ""
+	for _, rm := range remotes {
+		if _, err := r.Storer.Reference(plumbing.ReferenceName("refs/remotes/" + rm.name + "/" + name)); err == nil {
+			if found != "" {
+				return ""
+			}
+			found = rm.name + "/" + name
+		}
+	}
+	return found
+}
+
+// checkoutTracking creates branch name from a remote-tracking branch, sets
+// it as upstream, and switches to it.
+func (r *repo) checkoutTracking(name, remote string, quiet bool) error {
+	if err := r.switchBranch(name, true, remote, false, true); err != nil {
+		return err
+	}
+	remoteName, rest, _ := strings.Cut(remote, "/")
+	if err := r.setUpstream(name, remoteName, plumbing.NewBranchReferenceName(rest)); err != nil {
+		return err
+	}
+	if !quiet {
+		// git's buffered stdout lands after its stderr.
+		fmt.Fprintf(r.g.err, "Switched to a new branch '%s'\n", name)
+		fmt.Fprintf(r.g.out, "branch '%s' set up to track '%s'.\n", name, remote)
+	}
+	return nil
+}
+
 func (g *gitRun) checkout(args []string) error {
 	var create, quiet, detach, force bool
 	var newBranch string
@@ -917,6 +875,11 @@ func (g *gitRun) checkout(args []string) error {
 		rest = []string{"HEAD"}
 	}
 	name := rest[0]
+	if !detach && !r.isBranch(name) {
+		if remote := r.dwimRemote(name); remote != "" {
+			return r.checkoutTracking(name, remote, quiet)
+		}
+	}
 	if _, err := r.Storer.Reference(plumbing.NewBranchReferenceName(name)); err != nil && !detach {
 		if _, err := r.ResolveRevision(plumbing.Revision(name)); err != nil {
 			return r.checkoutPaths("", rest) // not a revision: treat as paths
@@ -1009,10 +972,11 @@ func (g *gitRun) switchBranch(args []string) error {
 		}
 		return r.switchBranch(rest[0], true, start, false, quiet)
 	}
-	if !detach {
-		if _, err := r.Storer.Reference(plumbing.NewBranchReferenceName(rest[0])); err != nil {
-			return fatalf("invalid reference: %s", rest[0])
+	if !detach && !r.isBranch(rest[0]) {
+		if remote := r.dwimRemote(rest[0]); remote != "" {
+			return r.checkoutTracking(rest[0], remote, quiet)
 		}
+		return fatalf("invalid reference: %s", rest[0])
 	}
 	return r.switchBranch(rest[0], false, "", detach, quiet)
 }
@@ -1262,7 +1226,7 @@ func (g *gitRun) tag(args []string) error {
 			rest = append(rest, a)
 		}
 	}
-	r, err := g.openRepo()
+	r, err := g.openAny()
 	if err != nil {
 		return err
 	}
@@ -1370,7 +1334,7 @@ func (g *gitRun) config(args []string) error {
 		if files = []string{g.globalConfig()}; files[0] == "" {
 			return fatalf("$HOME not set")
 		}
-	} else if r, err := g.openRepo(); err == nil {
+	} else if r, err := g.openAny(); err == nil {
 		files = []string{g.globalConfig(), r.localConfig()}
 	} else if len(rest) > 1 || unset {
 		return err

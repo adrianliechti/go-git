@@ -27,6 +27,7 @@ type logFormat struct {
 	nameStat  bool
 	noPatch   bool
 	decorate  bool
+	all       bool
 	deco      map[plumbing.Hash][]string // loaded lazily
 	count     int                        // -1 for unlimited
 	reverse   bool
@@ -70,6 +71,8 @@ func parseLogArgs(args []string) (*logFormat, error) {
 			f.noPatch = true
 		case a == "--reverse":
 			f.reverse = true
+		case a == "--all":
+			f.all = true
 		case a == "--decorate" || a == "--decorate=short" || a == "--decorate=full":
 			f.decorate = true
 		case a == "--no-decorate":
@@ -117,7 +120,7 @@ func (g *gitRun) log(args []string) error {
 	if len(f.remaining) > 0 {
 		return fatalf("unrecognized argument: %s", f.remaining[0])
 	}
-	r, err := g.openRepo()
+	r, err := g.openAny()
 	if err != nil {
 		return err
 	}
@@ -125,58 +128,8 @@ func (g *gitRun) log(args []string) error {
 	if err != nil {
 		return err
 	}
-	from, exclude := "HEAD", ""
-	switch len(f.revs) {
-	case 0:
-	case 1:
-		from = f.revs[0]
-		if a, b, ok := strings.Cut(from, ".."); ok {
-			exclude, from = a, b
-			if from == "" {
-				from = "HEAD"
-			}
-		}
-	default:
-		return fatalf("this git supports at most one revision or range")
-	}
-	if from == "HEAD" {
-		if head, err := r.headCommit(); err == nil && head == nil {
-			branch, _ := r.branchName()
-			return fatalf("your current branch '%s' does not have any commits yet", branch)
-		}
-	}
-	start, err := r.resolveCommit(from)
+	commits, err := r.walk(f, specs)
 	if err != nil {
-		return err
-	}
-	excluded := map[plumbing.Hash]bool{}
-	if exclude != "" {
-		c, err := r.resolveCommit(exclude)
-		if err != nil {
-			return err
-		}
-		iter := object.NewCommitPreorderIter(c, nil, nil)
-		iter.ForEach(func(c *object.Commit) error { excluded[c.Hash] = true; return nil })
-	}
-	var commits []*object.Commit
-	iter := object.NewCommitPreorderIter(start, nil, nil)
-	err = iter.ForEach(func(c *object.Commit) error {
-		if excluded[c.Hash] {
-			return nil
-		}
-		if len(specs) > 0 {
-			diffs, err := r.commitDiffs(c, specs)
-			if err != nil || len(diffs) == 0 {
-				return err
-			}
-		}
-		commits = append(commits, c)
-		if f.count >= 0 && len(commits) >= f.count && !f.reverse {
-			return errStop
-		}
-		return nil
-	})
-	if err != nil && err != errStop {
 		return err
 	}
 	if f.reverse {
@@ -198,7 +151,131 @@ func (g *gitRun) log(args []string) error {
 	return nil
 }
 
-var errStop = fmt.Errorf("stop")
+// walk selects commits like git's default revision walk: a queue ordered by
+// committer date, ties broken by insertion order, parents added as commits
+// are shown.
+func (r *repo) walk(f *logFormat, specs []string) ([]*object.Commit, error) {
+	var include []plumbing.Hash
+	excluded := map[plumbing.Hash]bool{}
+	exclude := func(rev string) error {
+		c, err := r.resolveCommit(rev)
+		if err != nil {
+			return err
+		}
+		for h := range r.ancestors(c.Hash) {
+			excluded[h] = true
+		}
+		return nil
+	}
+	revs := f.revs
+	if len(revs) == 0 && !f.all {
+		if head, err := r.headCommit(); err == nil && head == nil {
+			branch, _ := r.branchName()
+			return nil, fatalf("your current branch '%s' does not have any commits yet", branch)
+		}
+		revs = []string{"HEAD"}
+	}
+	for _, rev := range revs {
+		switch a, b, isRange := strings.Cut(rev, ".."); {
+		case isRange:
+			if err := exclude(defaultHead(a)); err != nil {
+				return nil, err
+			}
+			rev = defaultHead(b)
+		case strings.HasPrefix(rev, "^"):
+			if err := exclude(rev[1:]); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		c, err := r.resolveCommit(rev)
+		if err != nil {
+			return nil, err
+		}
+		include = append(include, c.Hash)
+	}
+	if f.all {
+		iter, err := r.Storer.IterReferences()
+		if err != nil {
+			return nil, err
+		}
+		var names []plumbing.ReferenceName
+		iter.ForEach(func(ref *plumbing.Reference) error {
+			if ref.Name() != plumbing.HEAD {
+				names = append(names, ref.Name())
+			}
+			return nil
+		})
+		sort.Slice(names, func(i, j int) bool { return names[i] < names[j] })
+		names = append(names, plumbing.HEAD)
+		for _, n := range names {
+			if h, ok := r.peel(n); ok {
+				if _, err := r.CommitObject(h); err == nil {
+					include = append(include, h)
+				}
+			}
+		}
+	}
+	type item struct {
+		c   *object.Commit
+		ctr int
+	}
+	var queue []item
+	added := map[plumbing.Hash]bool{}
+	ctr := 0
+	push := func(h plumbing.Hash) error {
+		if added[h] {
+			return nil
+		}
+		added[h] = true
+		c, err := r.CommitObject(h)
+		if err != nil {
+			return err
+		}
+		queue = append(queue, item{c, ctr})
+		ctr++
+		return nil
+	}
+	for _, h := range include {
+		if err := push(h); err != nil {
+			return nil, err
+		}
+	}
+	var out []*object.Commit
+	for len(queue) > 0 {
+		best := 0
+		for i, it := range queue {
+			bt, it2 := queue[best].c.Committer.When, it.c.Committer.When
+			if it2.After(bt) || (it2.Equal(bt) && it.ctr < queue[best].ctr) {
+				best = i
+			}
+		}
+		c := queue[best].c
+		queue = append(queue[:best], queue[best+1:]...)
+		if excluded[c.Hash] {
+			continue
+		}
+		for _, p := range c.ParentHashes {
+			if err := push(p); err != nil {
+				return nil, err
+			}
+		}
+		if len(specs) > 0 {
+			diffs, err := r.commitDiffs(c, specs)
+			if err != nil {
+				return nil, err
+			}
+			if len(diffs) == 0 {
+				continue
+			}
+		}
+		out = append(out, c)
+		if f.count >= 0 && len(out) >= f.count && !f.reverse {
+			break
+		}
+	}
+	return out, nil
+}
 
 // writeCommit prints the n-th commit of a log or show listing.
 func (r *repo) writeCommit(w io.Writer, c *object.Commit, f *logFormat, specs []string, n int) error {
@@ -456,7 +533,7 @@ func (g *gitRun) show(args []string) error {
 	if !f.stat && !f.nameOnly && !f.nameStat {
 		f.patch = true
 	}
-	r, err := g.openRepo()
+	r, err := g.openAny()
 	if err != nil {
 		return err
 	}
@@ -723,7 +800,7 @@ func (r *repo) printObject(w io.Writer, h plumbing.Hash, pretty bool) error {
 }
 
 func (g *gitRun) revParse(args []string) error {
-	r, err := g.openRepo()
+	r, err := g.openAny()
 	if err != nil {
 		if len(args) == 1 && args[0] == "--is-inside-work-tree" {
 			return failf(128, "fatal: not a git repository (or any of the parent directories): .git\n")
@@ -811,7 +888,7 @@ func (g *gitRun) catFile(args []string) error {
 	if len(args) != 2 {
 		return usagef("usage: git cat-file (-t | -s | -e | -p | <type>) <object>")
 	}
-	r, err := g.openRepo()
+	r, err := g.openAny()
 	if err != nil {
 		return err
 	}
@@ -910,7 +987,7 @@ func (g *gitRun) hashObject(args []string) error {
 	var r *repo
 	if write {
 		var err error
-		if r, err = g.openRepo(); err != nil {
+		if r, err = g.openAny(); err != nil {
 			return err
 		}
 	}

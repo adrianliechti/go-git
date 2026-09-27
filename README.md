@@ -21,14 +21,23 @@ code, err := git.Run(ctx, git.Options{
 
 ## Sandbox
 
-`Run` never touches the host: every read and write goes through `Options.FS`,
-and environment variables come only from `Options.Env`. The global config is
-`$GIT_CONFIG_GLOBAL` or `$HOME/.gitconfig` resolved inside the `FS`; system
-config, the host's home directory, the network, and child processes (editor,
-pager, hooks) are never used. go-git's `Plain*` functions and config-scope
-loaders read host files, so this package only calls APIs with explicit storage
-and always passes author, committer, and tagger signatures. `sandbox_test.go`
-checks this with an in-memory `FS` and a decoy host config.
+`Run` never touches the host filesystem: every read and write goes through
+`Options.FS`, and environment variables come only from `Options.Env`. The
+global config is `$GIT_CONFIG_GLOBAL` or `$HOME/.gitconfig` resolved inside
+the `FS`; system config, the host's home directory, and child processes
+(editor, pager, hooks, ssh) are never used. go-git's `Plain*` functions,
+config-scope loaders, and `Remote` type read host files, so this package only
+uses APIs with explicit storage and implements remotes itself.
+`sandbox_test.go` checks this with an in-memory `FS` and a decoy host config.
+
+Remotes:
+
+- Local paths and `file://` URLs name repositories inside the `FS`; objects
+  are copied between storages in-process.
+- `http://` and `https://` use go-git's smart HTTP client with
+  `Options.HTTPClient` (default `http.DefaultClient`). Set
+  `Options.DisableNetwork` to refuse them.
+- ssh and other transports are refused.
 
 `git.OpenDir(path)` is the one opt-in exception: it provides an `FS` for a host
 directory, confined with `os.Root`. `cmd/git` uses it rooted at `/`.
@@ -49,28 +58,29 @@ PATH=$PWD/bin:$PATH git init -q demo && cd demo && git status
 `git` and once with `cmd/git` first on `PATH`. Each command is echoed with its
 merged stdout/stderr and exit status, and the two transcripts must be
 identical, including commit and tree hashes. The scenarios cover commits,
-status (long, short, porcelain), diffs and stats, branches, fast-forward
-merges, reset/restore, rm, tags, subdirectories, log formats, ignore rules,
-config, amend, and error messages. They were written against git 2.54.
+status (long, short, porcelain, ignored), diffs and stats, renames, path
+quoting, branches and upstream tracking, fast-forward merges, reset/restore,
+mv, rm, clean, tags, decorations, subdirectories, log formats, ignore rules,
+config, amend, clone/fetch/push/pull between local and bare repositories, and
+error messages. They were written against git 2.54. `http_test.go` clones,
+pushes, and pulls over smart HTTP against the real `git http-backend`.
 
 ```sh
 go test ./...
 ```
 
-Supported commands: `init`, `add`, `rm`, `commit`, `status`, `log`, `show`,
-`diff`, `branch`, `checkout`, `switch`, `restore`, `reset`, `merge`, `tag`,
-`config`, `rev-parse`, `cat-file`, `ls-files`, `hash-object`, `version`.
-Only the common options of each are implemented.
+Supported commands: `init`, `clone`, `add`, `mv`, `rm`, `restore`, `clean`,
+`commit`, `status`, `log`, `show`, `diff`, `branch`, `checkout`, `switch`,
+`reset`, `merge`, `tag`, `remote`, `fetch`, `pull`, `push`, `config`,
+`rev-parse`, `cat-file`, `ls-files`, `hash-object`, `help`, `version`. Only the
+common options of each are implemented; `git help <command>` lists them.
 
 Known differences from git:
 
-- No network or remotes: `clone`, `fetch`, `pull`, `push`, `remote` are absent.
-- No `stash`, `rebase`, `cherry-pick`, `revert`, `mv`, `clean`, `blame`, `grep`.
-- `merge` only fast-forwards; `commit --amend` keeps only the first parent.
+- `merge` and `pull` only fast-forward; there are no merge commits yet.
+- No `stash`, `rebase`, `cherry-pick`, `revert`, `blame`, `grep`, reflog.
 - No editor, pager, hooks, or colors; `-m`/`-F` are required for messages.
-- No rename detection: renames show as a delete and an add.
 - Diffs use Myers with git's slide-down compaction but without the indent
   heuristic, so hunk placement can differ for indented code.
-- No symlinks, no ref decorations (`%d` is empty), short hashes are always 7
-  characters, and paths with special characters are not quoted.
+- No symlinks; short hashes are always 7 characters.
 - `-c name=value` is accepted and ignored.

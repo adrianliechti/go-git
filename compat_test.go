@@ -480,6 +480,96 @@ git add counted
 git diff --cached --stat
 git diff --cached -M --name-status
 `},
+	{"remotes", `
+git init -q --bare -b main server.git
+git clone server.git work
+cd work && git status
+cd work && git remote
+cd work && git remote -v
+cd work && git remote get-url origin
+cd work && git branch -a
+cd work && echo a > a && git add a && git commit -q -m a
+cd work && git status
+cd work && git status -sb
+cd work && git push
+cd work && git push -u origin main
+cd work && git status
+cd work && git status -sb
+cd work && git branch -vv
+cd work && git log --oneline --decorate
+git clone server.git other
+git clone -q server.git quiet
+cd other && git log --oneline --decorate
+cd other && git branch -a
+cd other && git branch -r
+cd other && echo b > b && git add b && git commit -q -m b
+cd other && git status -sb
+cd other && git push
+cd other && git checkout -q -b feature && echo f > f && git add f && git commit -q -m f
+cd other && git push origin feature
+cd other && git push origin feature:renamed
+cd other && git push origin --delete renamed
+cd other && git push origin --delete renamed
+cd work && git fetch
+cd work && git status
+cd work && git status -sb
+cd work && git branch -vv
+cd work && git pull
+cd work && git fetch origin
+cd work && git branch -a
+cd work && git log --oneline --decorate --all
+cd work && git checkout feature
+cd work && git branch -vv
+cd work && git switch -q main
+cd work && echo c > c && git add c && git commit -q -m c
+cd work && git push
+cd other && git checkout -q main
+cd other && echo d > d && git add d && git commit -q -m d
+cd other && git push
+cd other && git pull --ff-only
+cd other && git pull
+cd other && git status
+cd other && git status -sb
+cd other && git push --force
+cd work && git fetch
+cd work && git status -sb
+cd other && git tag v1 && git push origin v1
+cd other && git push --tags
+cd work && git fetch
+cd work && git tag
+cd other && git remote add second ../server.git
+cd other && git remote
+cd other && git remote rename second third
+cd other && git remote -v
+cd other && git remote remove third
+cd other && git remote
+cd other && git remote remove nope
+cd other && git fetch nope
+cd other && git remote add origin x
+git clone server.git work
+git clone missing.git x
+git clone --bare server.git mirror.git
+cd mirror.git && git log --oneline
+cd mirror.git && git branch
+cd quiet && git log --oneline
+cd quiet && git pull -q
+cd quiet && git log --oneline -1
+`},
+	{"push to a checked-out branch", `
+git init -q -b main upstream
+cd upstream && echo a > a && git add a && git commit -q -m a
+git clone -q upstream down
+cd down && echo b > b && git add b && git commit -q -m b
+cd down && git push
+cd down && git push origin main:other
+cd upstream && git branch
+cd down && git branch -u origin/other
+cd down && git status -sb
+cd down && git branch --unset-upstream
+cd down && git status -sb
+cd down && git branch -m renamed
+cd down && git branch
+`},
 }
 
 func TestCompatibility(t *testing.T) {

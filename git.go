@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
 	"os"
 	"path"
 	"sort"
@@ -50,6 +51,12 @@ type Options struct {
 	Stdout io.Writer
 	Stderr io.Writer
 	FS     FS
+
+	// DisableNetwork refuses http(s) remotes. Local paths and file:// URLs
+	// inside FS always work.
+	DisableNetwork bool
+	// HTTPClient is used for http(s) remotes; nil means http.DefaultClient.
+	HTTPClient *http.Client
 }
 
 // Run executes a subset of the git CLI on top of go-git and returns git's exit
@@ -63,6 +70,7 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	g := &gitRun{
 		ctx: ctx, fsys: opts.FS, envs: opts.Env, stdin: opts.Stdin,
 		cwd: path.Clean("/" + opts.Dir), out: opts.Stdout, err: opts.Stderr,
+		disableNetwork: opts.DisableNetwork, httpClient: opts.HTTPClient,
 	}
 	if g.stdin == nil {
 		g.stdin = strings.NewReader("")
@@ -87,6 +95,9 @@ type gitRun struct {
 	stdin    io.Reader
 	cwd      string // absolute virtual path, changed by -C
 	out, err io.Writer
+
+	disableNetwork bool
+	httpClient     *http.Client
 }
 
 // exitError carries a git-style exit status and message through helpers.
@@ -133,13 +144,17 @@ var commands = map[string]func(*gitRun, []string) error{
 	"version":     (*gitRun).version,
 	"mv":          (*gitRun).mv,
 	"clean":       (*gitRun).clean,
+	"clone":       (*gitRun).clone,
+	"fetch":       (*gitRun).fetchCmd,
+	"push":        (*gitRun).push,
+	"pull":        (*gitRun).pull,
+	"remote":      (*gitRun).remoteCmd,
 }
 
 // Commands that real git has but this implementation deliberately omits.
 var unsupported = []string{
-	"am", "apply", "bisect", "blame", "cherry-pick", "clone", "fetch",
-	"gc", "grep", "notes", "pull", "push", "rebase", "reflog", "remote",
-	"revert", "stash", "submodule", "worktree",
+	"am", "apply", "bisect", "blame", "cherry-pick", "gc", "grep", "notes",
+	"rebase", "reflog", "revert", "stash", "submodule", "worktree",
 }
 
 func (g *gitRun) main(args []string) int {
@@ -230,21 +245,64 @@ func fsName(abs string) string {
 type repo struct {
 	*gogit.Repository
 	g      *gitRun
-	wt     *billyFS
-	top    string // absolute path of the worktree root
-	prefix string // cwd relative to top, "" or ending in "/"
+	wt     *billyFS // nil for a bare repository
+	top    string   // absolute path of the worktree root, or of a bare repository
+	gitDir string   // absolute path of the git directory
+	prefix string   // cwd relative to top, "" or ending in "/"
 }
 
+func (r *repo) bare() bool { return r.wt == nil }
+
+// openRepo opens the repository containing cwd and requires a worktree.
 func (g *gitRun) openRepo() (*repo, error) {
+	r, err := g.openAny()
+	if err == nil && r.bare() {
+		return nil, fatalf("this operation must be run in a work tree")
+	}
+	return r, err
+}
+
+// openAny opens the repository containing cwd, which may be bare.
+func (g *gitRun) openAny() (*repo, error) {
 	for dir := g.cwd; ; dir = path.Dir(dir) {
 		if info, err := fs.Stat(g.fsys, fsName(path.Join(dir, ".git"))); err == nil && info.IsDir() {
 			return g.openAt(dir)
+		}
+		if g.isGitDir(dir) {
+			return g.openBare(dir)
 		}
 		if dir == "/" {
 			return nil, fatalf("not a git repository (or any of the parent directories): .git")
 		}
 	}
 }
+
+// isGitDir reports whether dir looks like a git directory (a bare repository).
+func (g *gitRun) isGitDir(dir string) bool {
+	for _, name := range []string{"objects", "refs"} {
+		if info, err := fs.Stat(g.fsys, fsName(path.Join(dir, name))); err != nil || !info.IsDir() {
+			return false
+		}
+	}
+	info, err := fs.Stat(g.fsys, fsName(path.Join(dir, "HEAD")))
+	return err == nil && !info.IsDir()
+}
+
+// openPath opens the repository at dir, as git does for a local remote:
+// dir itself, dir/.git, or dir.git.
+func (g *gitRun) openPath(dir string) (*repo, error) {
+	for _, d := range []string{dir, dir + ".git"} {
+		if info, err := fs.Stat(g.fsys, fsName(path.Join(d, ".git"))); err == nil && info.IsDir() {
+			return g.openAt(d)
+		}
+		if g.isGitDir(d) {
+			return g.openBare(d)
+		}
+	}
+	return nil, errNoRepo
+}
+
+var errNoRepo = errors.New("not a git repository")
 
 func (g *gitRun) openAt(top string) (*repo, error) {
 	wt := newBillyFS(g.fsys, fsName(top))
@@ -258,10 +316,21 @@ func (g *gitRun) openAt(top string) (*repo, error) {
 		return nil, fatalf("not a git repository: %s: %v", top, err)
 	}
 	prefix := ""
-	if g.cwd != top {
+	if strings.HasPrefix(g.cwd, top+"/") {
 		prefix = strings.TrimPrefix(g.cwd, top+"/") + "/"
+	} else if top == "/" && g.cwd != "/" {
+		prefix = strings.TrimPrefix(g.cwd, "/") + "/"
 	}
-	return &repo{Repository: r, g: g, wt: wt, top: top, prefix: prefix}, nil
+	return &repo{Repository: r, g: g, wt: wt, top: top, gitDir: path.Join(top, ".git"), prefix: prefix}, nil
+}
+
+func (g *gitRun) openBare(dir string) (*repo, error) {
+	st := filesystem.NewStorage(newBillyFS(g.fsys, fsName(dir)), cache.NewObjectLRUDefault())
+	r, err := gogit.Open(st, nil)
+	if err != nil {
+		return nil, fatalf("not a git repository: %s: %v", dir, err)
+	}
+	return &repo{Repository: r, g: g, top: dir, gitDir: dir}, nil
 }
 
 // repoPath converts a user path to a repository path ("" for the top).
@@ -540,7 +609,7 @@ func (g *gitRun) writeConfig(name string, cfg *format.Config) error {
 	return f.Close()
 }
 
-func (r *repo) localConfig() string { return fsName(path.Join(r.top, ".git", "config")) }
+func (r *repo) localConfig() string { return fsName(path.Join(r.gitDir, "config")) }
 
 // configValue returns the effective value of key, with local overriding global.
 func (r *repo) configValue(key string) string {
