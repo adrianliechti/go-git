@@ -709,6 +709,48 @@ git cherry-pick -x side~1
 git log --format=%B -1
 git cherry-pick --continue
 `},
+	{"log graph", `
+git init -q -b main
+echo 1 > a
+git add a
+git commit -q -m one
+git log --graph --oneline
+echo 2 >> a
+git commit -qam two
+git checkout -q -b feature
+echo f > f
+git add f
+git commit -q -m f1
+echo f >> f
+git commit -qam f2
+git checkout -q main
+echo 3 >> a
+git commit -qam three
+git log --graph --oneline --all
+git merge -q feature -m "merge feature"
+git log --graph --oneline
+git log --graph --oneline --decorate --all
+git checkout -q -b other HEAD~2
+echo o > o
+git add o
+git commit -q -m o1
+git checkout -q -b third main~1
+echo t > t
+git add t
+git commit -q -m t1
+git log --graph --oneline --all
+git checkout -q main
+git merge -q other -m "merge other"
+git merge -q third -m "merge third"
+git log --graph --oneline
+git log --graph --format="%h %s"
+git log --graph -2
+git log --graph --stat -2
+git log --graph --oneline --stat -3
+git log --graph --oneline -3
+git log --topo-order --oneline
+git log --graph --reverse
+`},
 }
 
 func TestCompatibility(t *testing.T) {

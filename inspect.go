@@ -28,6 +28,10 @@ type logFormat struct {
 	noPatch   bool
 	decorate  bool
 	all       bool
+	graphMode bool
+	topo      bool
+	graph     *logGraph
+	excluded  map[plumbing.Hash]bool
 	deco      map[plumbing.Hash][]string // loaded lazily
 	count     int                        // -1 for unlimited
 	reverse   bool
@@ -73,6 +77,11 @@ func parseLogArgs(args []string) (*logFormat, error) {
 			f.reverse = true
 		case a == "--all":
 			f.all = true
+		case a == "--graph":
+			f.graphMode, f.topo = true, true
+		case a == "--topo-order":
+			f.topo = true
+		case a == "--date-order":
 		case a == "--decorate" || a == "--decorate=short" || a == "--decorate=full":
 			f.decorate = true
 		case a == "--no-decorate":
@@ -128,9 +137,26 @@ func (g *gitRun) log(args []string) error {
 	if err != nil {
 		return err
 	}
+	if f.graphMode && f.reverse {
+		return fatalf("options '--graph' and '--reverse' cannot be used together")
+	}
+	count := f.count
+	if f.topo {
+		f.count = -1 // topological sorting needs the whole walk
+	}
 	commits, err := r.walk(f, specs)
+	f.count = count
 	if err != nil {
 		return err
+	}
+	if f.topo {
+		commits = topoOrder(commits)
+		if f.count >= 0 && len(commits) > f.count && !f.reverse {
+			commits = commits[:f.count]
+		}
+	}
+	if f.graphMode {
+		f.graph = newLogGraph(func(h plumbing.Hash) bool { return !f.excluded[h] })
 	}
 	if f.reverse {
 		if f.count >= 0 && len(commits) > f.count {
@@ -216,6 +242,7 @@ func (r *repo) walk(f *logFormat, specs []string) ([]*object.Commit, error) {
 			}
 		}
 	}
+	f.excluded = excluded
 	type item struct {
 		c   *object.Commit
 		ctr int
@@ -277,43 +304,53 @@ func (r *repo) walk(f *logFormat, specs []string) ([]*object.Commit, error) {
 	return out, nil
 }
 
-// writeCommit prints the n-th commit of a log or show listing.
-func (r *repo) writeCommit(w io.Writer, c *object.Commit, f *logFormat, specs []string, n int) error {
+// commitText renders a commit's header and message without separators.
+// The medium format ends with a newline; the one-line formats do not.
+func (r *repo) commitText(c *object.Commit, f *logFormat) string {
+	var b strings.Builder
 	switch f.kind {
 	case "medium":
-		if n > 0 {
-			fmt.Fprintln(w)
-		}
-		fmt.Fprintf(w, "commit %s%s\n", c.Hash, r.decoration(f, c.Hash, f.decorate))
+		fmt.Fprintf(&b, "commit %s%s\n", c.Hash, r.decoration(f, c.Hash, f.decorate))
 		if len(c.ParentHashes) > 1 {
-			fmt.Fprint(w, "Merge:")
+			b.WriteString("Merge:")
 			for _, p := range c.ParentHashes {
-				fmt.Fprintf(w, " %s", short(p))
+				fmt.Fprintf(&b, " %s", short(p))
 			}
-			fmt.Fprintln(w)
+			b.WriteString("\n")
 		}
-		fmt.Fprintf(w, "Author: %s <%s>\nDate:   %s\n\n", c.Author.Name, c.Author.Email, gitDate(c.Author.When))
+		fmt.Fprintf(&b, "Author: %s <%s>\nDate:   %s\n\n", c.Author.Name, c.Author.Email, gitDate(c.Author.When))
 		for _, line := range strings.Split(strings.TrimRight(c.Message, "\n"), "\n") {
-			fmt.Fprintf(w, "    %s\n", line)
+			fmt.Fprintf(&b, "    %s\n", line)
 		}
 	case "oneline", "full-oneline":
 		h := c.Hash.String()
 		if f.kind == "oneline" {
 			h = short(c.Hash)
 		}
-		fmt.Fprintf(w, "%s%s %s\n", h, r.decoration(f, c.Hash, f.decorate), subject(c.Message))
-	case "format":
-		if n > 0 {
-			fmt.Fprintln(w)
-		}
-		fmt.Fprint(w, expandFormat(f.template, c, r.labels(f, c.Hash)))
-	case "tformat":
-		fmt.Fprintf(w, "%s\n", expandFormat(f.template, c, r.labels(f, c.Hash)))
+		fmt.Fprintf(&b, "%s%s %s", h, r.decoration(f, c.Hash, f.decorate), subject(c.Message))
+	case "format", "tformat":
+		b.WriteString(expandFormat(f.template, c, r.labels(f, c.Hash)))
 	}
-	if f.noPatch || !(f.patch || f.stat || f.nameOnly || f.nameStat) {
-		return nil
+	return b.String()
+}
+
+// separated reports whether entries are separated (medium, format:) rather
+// than terminated (oneline, tformat:).
+func (f *logFormat) separated() bool { return f.kind == "medium" || f.kind == "format" }
+
+// writeCommit prints the n-th commit of a log or show listing.
+func (r *repo) writeCommit(w io.Writer, c *object.Commit, f *logFormat, specs []string, n int) error {
+	if f.graph != nil {
+		return r.writeGraphCommit(w, c, f, specs, n)
 	}
-	diffs, err := r.commitDiffs(c, specs)
+	if n > 0 && f.separated() {
+		fmt.Fprintln(w)
+	}
+	fmt.Fprint(w, r.commitText(c, f))
+	if !f.separated() {
+		fmt.Fprintln(w)
+	}
+	diffs, err := r.logDiffs(c, f, specs)
 	if err != nil || len(diffs) == 0 {
 		return err
 	}
@@ -322,6 +359,73 @@ func (r *repo) writeCommit(w io.Writer, c *object.Commit, f *logFormat, specs []
 	}
 	writeDiffs(w, diffs, f.stat, f.patch, f.nameOnly, f.nameStat, false)
 	return nil
+}
+
+func (r *repo) logDiffs(c *object.Commit, f *logFormat, specs []string) ([]*fileDiff, error) {
+	// Like git without -m or --cc, merge commits show no diff.
+	if f.noPatch || !(f.patch || f.stat || f.nameOnly || f.nameStat) || len(c.ParentHashes) > 1 {
+		return nil, nil
+	}
+	return r.commitDiffs(c, specs)
+}
+
+// writeGraphCommit prints a commit with graph rows as git's show_log and
+// graph_show_commit_msg do: each message line after the first takes the
+// next graph row, leftover rows follow the message, and diff lines are
+// prefixed with padding rows.
+func (r *repo) writeGraphCommit(w io.Writer, c *object.Commit, f *logFormat, specs []string, n int) error {
+	g := f.graph
+	var b strings.Builder
+	g.update(c)
+	if n > 0 && f.separated() {
+		b.WriteString(g.paddingLine() + "\n")
+	}
+	g.showCommit(&b)
+	text := r.commitText(c, f)
+	for i, line := range strings.SplitAfter(text, "\n") {
+		if line == "" {
+			continue
+		}
+		if i > 0 {
+			row, _ := g.nextLine()
+			b.WriteString(row)
+		}
+		b.WriteString(line)
+	}
+	nl := strings.HasSuffix(text, "\n")
+	if !g.finished() {
+		if !nl {
+			b.WriteString("\n")
+		}
+		g.remainder(&b)
+		if nl {
+			b.WriteString("\n")
+		}
+	}
+	if !f.separated() {
+		if nl {
+			b.WriteString(g.paddingLine())
+		}
+		b.WriteString("\n")
+	}
+	diffs, err := r.logDiffs(c, f, specs)
+	if err != nil {
+		return err
+	}
+	if len(diffs) > 0 {
+		if f.kind != "oneline" && f.kind != "full-oneline" {
+			b.WriteString(g.paddingLine() + "\n")
+		}
+		var d strings.Builder
+		writeDiffs(&d, diffs, f.stat, f.patch, f.nameOnly, f.nameStat, false)
+		for _, line := range strings.SplitAfter(d.String(), "\n") {
+			if line != "" {
+				b.WriteString(g.paddingLine() + line)
+			}
+		}
+	}
+	_, err = io.WriteString(w, b.String())
+	return err
 }
 
 // writeDiffs prints the selected diff outputs in git's order.
