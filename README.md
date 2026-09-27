@@ -63,7 +63,8 @@ quoting, branches and upstream tracking, fast-forward and three-way merges
 with conflicts, cherry-pick, revert, reset/restore,
 mv, rm, clean, tags, decorations, subdirectories, log formats, ignore rules,
 config, amend, clone/fetch/push/pull between local and bare repositories, and
-error messages. They were written against git 2.54. `http_test.go` clones,
+error messages. They were written against git 2.54, which `git version`
+reports as the release whose behavior this package follows. `http_test.go` clones,
 pushes, and pulls over smart HTTP against the real `git http-backend`.
 
 ```sh
@@ -73,7 +74,8 @@ go test ./...
 Supported commands: `init`, `clone`, `add`, `mv`, `rm`, `restore`, `clean`,
 `stash`, `commit`, `status`, `log`, `show`, `diff`, `grep`, `blame`,
 `shortlog`, `describe`, `branch`, `checkout`, `switch`, `reset`, `merge`,
-`rebase`, `cherry-pick`, `revert`, `bisect`, `tag`, `remote`, `fetch`, `pull`, `push`,
+`rebase`, `cherry-pick`, `revert`, `bisect`, `format-patch`, `apply`, `am`,
+`tag`, `remote`, `fetch`, `pull`, `push`,
 `ls-remote`, `reflog`, `config`, `help`, `version`, and the plumbing commands
 `rev-parse`, `rev-list`, `cat-file`, `hash-object`, `ls-files`, `ls-tree`,
 `show-ref`, `for-each-ref`, `update-ref`, `symbolic-ref`, `write-tree`,

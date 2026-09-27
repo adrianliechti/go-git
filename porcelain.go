@@ -705,6 +705,13 @@ func (r *repo) statusName(f fileStatus) string {
 // writeOperationState describes a merge, cherry-pick, or revert in progress.
 func (r *repo) writeOperationState(w io.Writer, st *repoStatus) {
 	unmerged := st.hasUnmerged()
+	if _, ok := r.gitFile(path.Join(amDir, "queue")); ok {
+		fmt.Fprint(w, "You are in the middle of an am session.\n"+
+			"  (fix conflicts and then run \"git am --continue\")\n"+
+			"  (use \"git am --skip\" to skip this patch)\n"+
+			"  (use \"git am --abort\" to restore the original branch)\n\n")
+		return
+	}
 	if _, ok := r.gitFile(mergeHeadFile); ok {
 		if unmerged {
 			fmt.Fprint(w, "You have unmerged paths.\n  (fix conflicts and run \"git commit\")\n  (use \"git merge --abort\" to abort the merge)\n\n")

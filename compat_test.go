@@ -1203,6 +1203,55 @@ git bisect good HEAD~2
 git bisect bad
 git bisect reset
 `},
+	{"patches", `
+git init -q -b main
+printf '1\n2\n3\n4\n5\n' > f
+git add f
+git commit -qm base
+git checkout -qb topic
+sed 's/^2$/two/' f > t && mv t f
+echo n > new
+git add .
+git commit -qm "Change two: and add new" -m "Body line."
+git mv new renamed
+git commit -qm "rename it"
+git format-patch --no-signature main
+cat 0001-Change-two-and-add-new.patch
+cat 0002-rename-it.patch
+git format-patch -1 --stdout --no-signature HEAD
+git format-patch -o out -n --no-signature main
+git format-patch --stdout --signature=sig -1
+git checkout -q main
+git apply --stat 0001-Change-two-and-add-new.patch
+git apply --numstat 0001-Change-two-and-add-new.patch
+git apply --summary 0001-Change-two-and-add-new.patch
+git apply --check 0001-Change-two-and-add-new.patch
+git apply 0001-Change-two-and-add-new.patch
+git status -s
+git apply 0001-Change-two-and-add-new.patch
+git apply -R 0001-Change-two-and-add-new.patch
+git status -s
+git apply --index 0001-Change-two-and-add-new.patch
+git status -s
+git reset -q --hard
+rm new
+git am 0001-Change-two-and-add-new.patch 0002-rename-it.patch
+git log --format="%h %an %ad %cn %s%n%b" -2
+git am 0001-Change-two-and-add-new.patch
+git status
+git am --abort
+git log --oneline -1
+git status -s
+git diff HEAD~2 | git apply -R --stat
+printf '1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n' > g
+git add g
+git commit -qm g
+git diff HEAD~1 HEAD > g.diff
+git reset -q --hard HEAD~1
+printf 'a\nb\n' > g
+cat g.diff | sed 's/^+1$/+one/' > g2.diff
+git apply g2.diff
+`},
 }
 
 func TestCompatibility(t *testing.T) {

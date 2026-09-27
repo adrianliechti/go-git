@@ -276,6 +276,9 @@ var commands = map[string]func(*gitRun, []string) error{
 	"grep":          (*gitRun).grep,
 	"blame":         (*gitRun).blame,
 	"bisect":        (*gitRun).bisect,
+	"format-patch":  (*gitRun).formatPatch,
+	"apply":         (*gitRun).apply,
+	"am":            (*gitRun).am,
 	"version":       (*gitRun).version,
 	"mv":            (*gitRun).mv,
 	"clean":         (*gitRun).clean,
@@ -291,7 +294,7 @@ var commands = map[string]func(*gitRun, []string) error{
 
 // Commands that real git has but this implementation deliberately omits.
 var unsupported = []string{
-	"am", "apply", "gc", "notes",
+	"gc", "notes",
 	"submodule", "worktree",
 }
 
@@ -399,7 +402,8 @@ func (g *gitRun) main(args []string) int {
 }
 
 func (g *gitRun) version([]string) error {
-	fmt.Fprintln(g.out, "git version 2.0.0 (go-git v5)")
+	// The version is the git release whose behavior this package follows.
+	fmt.Fprintln(g.out, "git version "+gitVersion)
 	return nil
 }
 
