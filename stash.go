@@ -204,7 +204,7 @@ func (r *repo) stashPush(sub string, args []string) error {
 			return err
 		}
 		for _, f := range files {
-			if _, tracked := index[f.path]; !tracked && (all || !f.ignored) && matchAny(specs, f.path) {
+			if _, tracked := index[f.path]; !tracked && !f.repo && (all || !f.ignored) && matchAny(specs, f.path) {
 				untrackedFiles = append(untrackedFiles, f.path)
 			}
 		}

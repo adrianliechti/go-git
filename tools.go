@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/go-git/go-git/v5/plumbing/filemode"
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
@@ -417,7 +418,10 @@ func (g *gitRun) grep(args []string) error {
 	found := false
 	for _, src := range sources {
 		var names []string
-		for p := range src.files {
+		for p, e := range src.files {
+			if e.mode == filemode.Submodule {
+				continue
+			}
 			if matchAny(specs, p) && (r.prefix == "" || strings.HasPrefix(p, r.prefix) || len(specs) > 0) {
 				names = append(names, p)
 			}

@@ -20,6 +20,7 @@ import (
 type wtFile struct {
 	path    string
 	ignored bool
+	repo    bool // a nested repository (submodule), reported as a unit
 }
 
 func (r *repo) ignoreMatcher() (gitignore.Matcher, error) {
@@ -54,6 +55,8 @@ func (r *repo) walkFiles(dir string, m gitignore.Matcher, withIgnored bool) ([]w
 			}
 			ign := ignored || m.Match(strings.Split(p, "/"), info.IsDir())
 			switch {
+			case info.IsDir() && r.isNestedRepo(p):
+				out = append(out, wtFile{path: p, ignored: ign, repo: true})
 			case info.IsDir():
 				if !ign || withIgnored {
 					if err := walk(p, ign); err != nil {
@@ -69,6 +72,11 @@ func (r *repo) walkFiles(dir string, m gitignore.Matcher, withIgnored bool) ([]w
 	return out, walk(dir, false)
 }
 
+func (r *repo) isNestedRepo(p string) bool {
+	_, err := r.wt.Stat(path.Join(p, ".git"))
+	return err == nil
+}
+
 func dirOrDot(dir string) string {
 	if dir == "" {
 		return "."
@@ -78,6 +86,7 @@ func dirOrDot(dir string) string {
 
 type fileStatus struct {
 	path             string
+	sub              string // submodule detail for long status, e.g. "(new commits)"
 	staged, unstaged byte   // ' ', 'A', 'M', 'D', 'R'; 'U' etc. when unmerged
 	oldPath          string // source of a staged rename
 	unmerged         string // long-status label of an unmerged path
@@ -162,8 +171,20 @@ func (r *repo) computeStatus(specs []string, collapse, withUntracked bool) (*rep
 		f.staged, f.oldPath = changeCode(c), c.oldPath
 	}
 	for _, c := range changes(indexSide, work, specs) {
-		if c.from != nil { // worktree-only files are untracked, handled below
-			get(c.path).unstaged = changeCode(c)
+		if c.from == nil {
+			continue // worktree-only files are untracked, handled below
+		}
+		f := get(c.path)
+		f.unstaged = changeCode(c)
+		if c.to != nil && c.from.mode == filemode.Submodule && c.to.mode == filemode.Submodule {
+			f.unstaged, f.sub = submoduleCode(*c.from, *c.to)
+		}
+	}
+	// Submodules with only untracked files inside do not show in diffs.
+	for p, e := range work {
+		if e.mode == filemode.Submodule && e.dirtyUntracked && matchAny(specs, p) && byPath[p] == nil {
+			f := get(p)
+			f.unstaged, f.sub = submoduleCode(indexSide[p], e)
 		}
 	}
 	// Unmerged paths replace whatever the stage-0 comparison found.
@@ -206,6 +227,9 @@ func (r *repo) computeStatus(specs []string, collapse, withUntracked bool) (*rep
 			continue
 		}
 		name := f.path
+		if f.repo {
+			name += "/"
+		}
 		if collapse {
 			// Report the outermost directory that holds no tracked files.
 			for d := path.Dir(f.path); d != "."; d = path.Dir(d) {
@@ -255,7 +279,7 @@ func (r *repo) addIgnored(st *repoStatus, specs []string, collapse bool) error {
 	}
 	seen := map[string]bool{}
 	for _, f := range files {
-		if tracked[f.path] || !f.ignored || !matchAny(specs, f.path) {
+		if tracked[f.path] || !f.ignored || f.repo || !matchAny(specs, f.path) {
 			continue
 		}
 		name := f.path
@@ -273,6 +297,26 @@ func (r *repo) addIgnored(st *repoStatus, specs []string, collapse bool) error {
 	}
 	sort.Strings(st.ignored)
 	return nil
+}
+
+// submoduleCode is the status code and detail of a changed submodule:
+// 'M' for new commits, 'm' for modified content, '?' for untracked content.
+func submoduleCode(index, work entry) (byte, string) {
+	var parts []string
+	code := byte('?')
+	if index.hash != work.hash {
+		parts, code = append(parts, "new commits"), 'M'
+	}
+	if work.dirtyModified {
+		parts = append(parts, "modified content")
+		if code == '?' {
+			code = 'm'
+		}
+	}
+	if work.dirtyUntracked {
+		parts = append(parts, "untracked content")
+	}
+	return code, "(" + strings.Join(parts, ", ") + ")"
 }
 
 func changeCode(c change) byte {
@@ -293,6 +337,13 @@ func (r *repo) writeFile(p string, e entry) (os.FileInfo, error) {
 	data, err := e.data()
 	if err != nil {
 		return nil, err
+	}
+	if e.mode == filemode.Submodule {
+		// A submodule is only a directory here; its content is its own.
+		if err := r.wt.MkdirAll(p, 0777); err != nil {
+			return nil, err
+		}
+		return r.wt.Stat(p)
 	}
 	if info, err := r.wt.Stat(p); err == nil && info.IsDir() {
 		return nil, fmt.Errorf("cannot overwrite directory %s", p)
@@ -423,6 +474,12 @@ func (r *repo) stageFile(idx *index.Index, p string) error {
 	if cur, err := idx.Entry(p); err == nil && cur.Hash == e.hash && cur.Mode == e.mode {
 		return nil
 	}
+	if e.mode == filemode.Submodule {
+		if !e.unknown && !e.hash.IsZero() {
+			setEntry(idx, p, e, nil)
+		}
+		return nil
+	}
 	data, _ := e.data()
 	if _, err := r.writeBlob(data, e.mode); err != nil {
 		return err
@@ -457,6 +514,9 @@ func (r *repo) switchTo(target *object.Commit, op string, force bool) error {
 	if !force {
 		var dirty, untracked []string
 		for _, c := range moves {
+			if (c.from != nil && c.from.mode == filemode.Submodule) || (c.to != nil && c.to.mode == filemode.Submodule) {
+				continue // checkout leaves submodule contents alone
+			}
 			ie, inIndex := cur[c.path]
 			we, inWork, err := r.worktreeEntry(c.path)
 			if err != nil {

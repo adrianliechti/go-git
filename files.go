@@ -243,7 +243,7 @@ func (g *gitRun) clean(args []string) error {
 	}
 	targets := map[string]bool{}
 	for _, f := range files {
-		if tracked[f.path] || !selected(f) || !matchAny(specs, f.path) {
+		if tracked[f.path] || f.repo || !selected(f) || !matchAny(specs, f.path) {
 			continue
 		}
 		d := topDir(f.path)

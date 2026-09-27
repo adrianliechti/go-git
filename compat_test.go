@@ -1295,6 +1295,66 @@ cd wt-moved && git switch main
 cd repo && git rev-parse --git-dir --git-common-dir
 ls
 `},
+	{"submodules", `
+git init -q -b main lib
+cd lib && echo l > l && git add l && git commit -qm lib1
+git init -q -b main app
+cd app && echo a > a && git add a && git commit -qm app1
+cd app && git submodule add ../lib libs/lib
+cd app && git status
+cd app && git status -s
+cat app/.gitmodules
+cat app/libs/lib/.git
+cd app && git config --file .git/modules/libs/lib/config core.worktree
+cd app && git ls-files -s
+cd app && git diff --cached
+cd app && git commit -qm "add lib"
+cd app && git submodule status
+cd app && git submodule
+cd lib && echo l2 >> l && git commit -qam lib2
+cd app/libs/lib && git pull -q
+cd app && git status
+cd app && git status -s
+cd app && git diff
+cd app && git submodule status
+cd app && git add libs/lib && git commit -qm "bump lib"
+echo dirty >> app/libs/lib/l
+cd app && git status -s
+cd app && git status
+cd app && git diff
+cd app/libs/lib && git checkout -q -- l
+echo u > app/libs/lib/untracked
+cd app && git status -s
+cd app && git status
+rm app/libs/lib/untracked
+cd app && git show --stat HEAD
+cd app && git log --oneline -p -1
+cd app && git cat-file -p HEAD^{tree}
+git clone -q app app2
+cd app2 && git submodule status
+ls app2/libs/lib
+cd app2 && git status -s
+cd app2 && git submodule init
+cd app2 && git submodule update
+cd app2 && git submodule status
+cd app2 && git submodule update --init
+cd app2/libs/lib && git status | head -1
+git clone -q --recurse-submodules app app3
+cd app3 && git submodule status
+cd app2 && git submodule deinit libs/lib
+cd app2 && git submodule status
+ls -a app2/libs/lib
+cd app2 && git submodule update --init
+cd app2 && git submodule status
+cd app2 && git submodule deinit --all
+cd app2 && git submodule sync
+cd app && git submodule sync
+cd app && git config submodule.libs/lib.url
+cd app && git checkout -q HEAD~1
+cd app && git submodule status
+cd app && git submodule update
+cd app && git submodule status
+`},
 }
 
 func TestCompatibility(t *testing.T) {
@@ -1341,6 +1401,8 @@ func transcript(t *testing.T, gitDir, script string) string {
 		"HOME=" + dir,
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_CONFIG_GLOBAL=/dev/null",
+		// Local submodule clones need the file transport, off by default.
+		"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=protocol.file.allow", "GIT_CONFIG_VALUE_0=always",
 		"TZ=UTC", "LC_ALL=C",
 		"GIT_AUTHOR_NAME=Ada Author", "GIT_AUTHOR_EMAIL=ada@example.com",
 		"GIT_COMMITTER_NAME=Cody Committer", "GIT_COMMITTER_EMAIL=cody@example.com",

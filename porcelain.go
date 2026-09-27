@@ -821,8 +821,22 @@ func (r *repo) writeStatusBody(w io.Writer, st *repoStatus, forCommit bool) {
 		fmt.Fprintf(w, "  (use \"git %s <file>...\" to update what will be committed)\n", verb)
 		fmt.Fprintln(w, `  (use "git restore <file>..." to discard changes in working directory)`)
 		for _, f := range st.tracked {
+			if strings.Contains(f.sub, "content") {
+				fmt.Fprintln(w, `  (commit or discard the untracked or modified content in submodules)`)
+				break
+			}
+		}
+		for _, f := range st.tracked {
 			if f.unstaged != ' ' && f.unmerged == "" {
-				fmt.Fprintf(w, "\t%-12s%s\n", labels[f.unstaged], q(r.display(f.path)))
+				label := labels[f.unstaged]
+				if f.sub != "" {
+					label = labels['M']
+				}
+				line := fmt.Sprintf("\t%-12s%s", label, q(r.display(f.path)))
+				if f.sub != "" {
+					line += " " + f.sub
+				}
+				fmt.Fprintln(w, line)
 			}
 		}
 		fmt.Fprintln(w)
@@ -1503,8 +1517,19 @@ func matchGlob(patterns []string, name string) bool {
 
 func (g *gitRun) config(args []string) error {
 	global, get, unset, list := false, false, false, false
+	file := ""
 	var rest []string
-	for _, a := range args {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if (a == "-f" || a == "--file") && i+1 < len(args) {
+			i++
+			file = args[i]
+			continue
+		}
+		if f, ok := strings.CutPrefix(a, "--file="); ok {
+			file = f
+			continue
+		}
 		switch a {
 		case "--global":
 			global = true
@@ -1525,7 +1550,9 @@ func (g *gitRun) config(args []string) error {
 		}
 	}
 	var files []string
-	if global {
+	if file != "" {
+		files = []string{fsName(g.abs(file))}
+	} else if global {
 		if files = []string{g.globalConfig()}; files[0] == "" {
 			return fatalf("$HOME not set")
 		}
@@ -1589,7 +1616,7 @@ func (g *gitRun) config(args []string) error {
 				value, found = v, true
 			}
 		}
-		if v, ok := g.configOverride(rest[0]); ok && !global {
+		if v, ok := g.configOverride(rest[0]); ok && !global && file == "" {
 			value, found = v, true
 		}
 		if !found {
@@ -1599,8 +1626,8 @@ func (g *gitRun) config(args []string) error {
 		return nil
 	}
 	_ = get
-	file := files[len(files)-1]
-	cfg, err := g.readConfig(file)
+	target := files[len(files)-1]
+	cfg, err := g.readConfig(target)
 	if err != nil {
 		return err
 	}
@@ -1616,9 +1643,9 @@ func (g *gitRun) config(args []string) error {
 	} else {
 		cfg.SetOption(sec, sub, key, rest[1])
 	}
-	if err := g.writeConfig(file, cfg); err != nil {
+	if err := g.writeConfig(target, cfg); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return fatalf("could not write config file %s", file)
+			return fatalf("could not write config file %s", target)
 		}
 		return err
 	}

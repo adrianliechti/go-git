@@ -128,10 +128,18 @@ type gitRun struct {
 	reflogAction   string   // command line for reflog messages, e.g. "fetch -q"
 }
 
-// configOverride returns the last -c value for key.
+// configOverride returns the last value for key from GIT_CONFIG_COUNT
+// variables or -c options, which take precedence in that order.
 func (g *gitRun) configOverride(key string) (string, bool) {
 	value, found := "", false
-	for _, kv := range g.overrides {
+	var pairs []string
+	if n, err := strconv.Atoi(g.envs["GIT_CONFIG_COUNT"]); err == nil {
+		for i := 0; i < n; i++ {
+			k, v := g.envs[fmt.Sprintf("GIT_CONFIG_KEY_%d", i)], g.envs[fmt.Sprintf("GIT_CONFIG_VALUE_%d", i)]
+			pairs = append(pairs, k+"="+v)
+		}
+	}
+	for _, kv := range append(pairs, g.overrides...) {
 		k, v, hasValue := strings.Cut(kv, "=")
 		if !hasValue {
 			v = "true" // "-c name" alone means true
@@ -282,6 +290,7 @@ var commands = map[string]func(*gitRun, []string) error{
 	"apply":         (*gitRun).apply,
 	"am":            (*gitRun).am,
 	"worktree":      (*gitRun).worktree,
+	"submodule":     (*gitRun).submodule,
 	"version":       (*gitRun).version,
 	"mv":            (*gitRun).mv,
 	"clean":         (*gitRun).clean,
@@ -298,7 +307,6 @@ var commands = map[string]func(*gitRun, []string) error{
 // Commands that real git has but this implementation deliberately omits.
 var unsupported = []string{
 	"gc", "notes",
-	"submodule",
 }
 
 func (g *gitRun) main(args []string) int {

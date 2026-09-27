@@ -484,7 +484,7 @@ func argRefSpec(s, remote string, info *remoteInfo) config.RefSpec {
 // Cloning
 
 func (g *gitRun) clone(args []string) error {
-	var quiet, bare, noCheckout bool
+	var quiet, bare, noCheckout, recurse bool
 	branch, origin := "", "origin"
 	var rest []string
 	for i := 0; i < len(args); i++ {
@@ -495,6 +495,8 @@ func (g *gitRun) clone(args []string) error {
 			bare = true
 		case a == "-n" || a == "--no-checkout":
 			noCheckout = true
+		case a == "--recurse-submodules" || a == "--recursive":
+			recurse = true
 		case (a == "-b" || a == "--branch") && i+1 < len(args):
 			i++
 			branch = args[i]
@@ -577,13 +579,31 @@ func (g *gitRun) clone(args []string) error {
 	if err != nil {
 		return err
 	}
-	cfg, err := r.readLocalConfig()
-	if err != nil {
-		return err
-	}
 	url := src
 	if ep.local != "" {
 		url = ep.local
+	}
+	if err := r.populateClone(ep, adv, url, origin, head, bare, noCheckout); err != nil {
+		return err
+	}
+	if recurse && !bare {
+		if err := r.submoduleUpdate([]string{"--init", "--recursive"}, quiet); err != nil {
+			return err
+		}
+	}
+	if !quiet && ep.local != "" {
+		fmt.Fprintln(g.err, "done.")
+	}
+	return nil
+}
+
+// populateClone configures the remote, fetches everything from ep into
+// the freshly initialized r, and checks out the remote's HEAD branch.
+func (r *repo) populateClone(ep endpoint, adv *remoteRefs, url, origin string, head plumbing.ReferenceName, bare, noCheckout bool) error {
+	g := r.g
+	cfg, err := r.readLocalConfig()
+	if err != nil {
+		return err
 	}
 	cfg.SetOption("remote", origin, "url", url)
 	spec := "+refs/heads/*:refs/heads/*"
@@ -627,9 +647,6 @@ func (g *gitRun) clone(args []string) error {
 		if err := r.setUpstream(head.Short(), origin, head); err != nil {
 			return err
 		}
-	}
-	if !quiet && ep.local != "" {
-		fmt.Fprintln(g.err, "done.")
 	}
 	return nil
 }

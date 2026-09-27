@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"path"
 	"sort"
 	"strings"
 
@@ -20,6 +21,14 @@ type entry struct {
 	hash plumbing.Hash
 	mode filemode.FileMode
 	data func() ([]byte, error)
+	// For a submodule in the worktree: uncommitted changes or untracked
+	// files inside it, or unknown when it is not checked out.
+	dirtyModified, dirtyUntracked, unknown bool
+}
+
+// gitlinkData is how diffs show a submodule commit.
+func gitlinkData(h plumbing.Hash, suffix string) func() ([]byte, error) {
+	return func() ([]byte, error) { return []byte("Subproject commit " + h.String() + suffix + "\n"), nil }
 }
 
 type side map[string]entry
@@ -62,6 +71,7 @@ func (r *repo) walkTree(s side, h plumbing.Hash, prefix string) error {
 				return err
 			}
 		case filemode.Submodule:
+			s[prefix+e.Name] = entry{hash: e.Hash, mode: e.Mode, data: gitlinkData(e.Hash, "")}
 		default:
 			s[prefix+e.Name] = entry{hash: e.Hash, mode: e.Mode, data: r.blobData(e.Hash)}
 		}
@@ -72,7 +82,11 @@ func (r *repo) walkTree(s side, h plumbing.Hash, prefix string) error {
 func (r *repo) indexSide(idx *index.Index) side {
 	s := side{}
 	for _, e := range idx.Entries {
-		if e.Stage == stageMerged {
+		switch {
+		case e.Stage != stageMerged:
+		case e.Mode == filemode.Submodule:
+			s[e.Name] = entry{hash: e.Hash, mode: e.Mode, data: gitlinkData(e.Hash, "")}
+		default:
 			s[e.Name] = entry{hash: e.Hash, mode: e.Mode, data: r.blobData(e.Hash)}
 		}
 	}
@@ -97,8 +111,11 @@ func (r *repo) worktreeSide(paths []string) (side, error) {
 
 func (r *repo) worktreeEntry(p string) (entry, bool, error) {
 	info, err := r.wt.Stat(p)
-	if err != nil || info.IsDir() {
+	if err != nil {
 		return entry{}, false, nil
+	}
+	if info.IsDir() {
+		return r.submoduleEntry(p)
 	}
 	full, _ := r.wt.full(p)
 	data, err := fs.ReadFile(r.g.fsys, full)
@@ -151,8 +168,14 @@ func changes(a, b side, specs []string) []change {
 			seen[p] = true
 			ea, oka := a[p]
 			eb, okb := b[p]
-			if oka && okb && ea.hash == eb.hash && ea.mode == eb.mode {
-				continue
+			if oka && okb {
+				gitlinks := ea.mode == filemode.Submodule && eb.mode == filemode.Submodule
+				if gitlinks && (ea.unknown || eb.unknown) {
+					continue // a submodule that is not checked out is unchanged
+				}
+				if ea.hash == eb.hash && ea.mode == eb.mode && !eb.dirtyModified {
+					continue
+				}
 			}
 			c := change{path: p}
 			if oka {
@@ -204,6 +227,29 @@ func computeDiff(c change) (*fileDiff, error) {
 		}
 	}
 	return d, nil
+}
+
+// submoduleEntry describes a directory in the worktree: the HEAD of a
+// checked-out submodule, or an unknown gitlink for an empty directory.
+func (r *repo) submoduleEntry(p string) (entry, bool, error) {
+	if _, err := r.wt.Stat(path.Join(p, ".git")); err != nil {
+		return entry{mode: filemode.Submodule, unknown: true}, true, nil
+	}
+	sub, err := r.g.openAt2(path.Join(r.top, p))
+	if err != nil {
+		return entry{mode: filemode.Submodule, unknown: true}, true, nil
+	}
+	e := entry{mode: filemode.Submodule, hash: sub.refHash(plumbing.HEAD)}
+	if st, err := sub.computeStatus(nil, false, true); err == nil {
+		e.dirtyModified = st.hasStaged() || st.hasUnstaged() || st.hasUnmerged()
+		e.dirtyUntracked = len(st.untracked) > 0
+	}
+	suffix := ""
+	if e.dirtyModified {
+		suffix = "-dirty"
+	}
+	e.data = gitlinkData(e.hash, suffix)
+	return e, true, nil
 }
 
 func isBinary(data []byte) bool {
