@@ -72,7 +72,9 @@ func (r *repo) walkTree(s side, h plumbing.Hash, prefix string) error {
 func (r *repo) indexSide(idx *index.Index) side {
 	s := side{}
 	for _, e := range idx.Entries {
-		s[e.Name] = entry{hash: e.Hash, mode: e.Mode, data: r.blobData(e.Hash)}
+		if e.Stage == stageMerged {
+			s[e.Name] = entry{hash: e.Hash, mode: e.Mode, data: r.blobData(e.Hash)}
+		}
 	}
 	return s
 }

@@ -570,6 +570,145 @@ cd down && git status -sb
 cd down && git branch -m renamed
 cd down && git branch
 `},
+	{"merge conflicts", `
+git init -q -b main
+printf '1\n2\n3\n4\n5\n6\n7\n8\n9\n' > f
+echo keep > k
+echo del > d
+git add .
+git commit -q -m base
+git checkout -q -b feature
+printf '1\nTWO\n3\n4\n5\n6\n7\nEIGHT\n9\n' > f
+echo x > both
+echo modified >> d
+git add .
+git commit -q -m feature
+git checkout -q main
+printf '1\nzwei\n3\n4\n5\n6\n7\n8\n9\nten\n' > f
+echo y > both
+git rm -q d
+git add .
+git commit -q -m main
+git merge feature
+cat f
+cat both
+git status
+git status -s
+git ls-files -s
+git commit -m x
+git checkout feature
+git merge feature
+git merge --abort
+git status -s
+git merge feature
+printf '1\nboth\n3\n4\n5\n6\n7\nEIGHT\n9\nten\n' > f
+git add f
+git status
+echo x > both
+git add both
+git rm -q d
+git status
+git commit --no-edit
+git log --format="%h %p %s"
+git merge --abort
+`},
+	{"clean merges", `
+git init -q -b main
+printf 'a\nb\nc\nd\ne\nf\ng\nh\n' > f
+git add f
+git commit -q -m base
+git checkout -q -b feature
+sed 's/^b$/B/' f > t && mv t f
+echo new > n
+git add .
+git commit -q -m feature
+git checkout -q main
+sed 's/^g$/G/' f > t && mv t f
+git commit -qam main
+git merge feature
+git log --format="%h %p %s" -3
+cat f
+git checkout -q -b topic HEAD~1
+echo t > t
+git add t
+git commit -q -m t
+git merge main -q
+git log -1 --format=%s
+git checkout -q main
+git merge topic --no-ff -m "custom message"
+git log -1 --format="%s %p"
+git merge topic
+git merge-base main feature
+git merge-base --is-ancestor feature main
+git merge-base --is-ancestor main feature
+`},
+	{"merge options", `
+git init -q -b main
+echo a > a
+git add a
+git commit -q -m a
+git checkout -q -b side
+echo s > s
+git add s
+git commit -q -m s
+echo t > t
+git add t
+git commit -q -m t
+git checkout -q main
+git merge --squash side
+git status -s
+cat .git/SQUASH_MSG
+git commit -q -m squashed
+git log --oneline
+git reset -q --hard HEAD~1
+echo m > m
+git add m
+git commit -q -m m
+git merge --no-commit side
+git status
+cat .git/MERGE_HEAD
+git commit -q --no-edit
+git log --format="%s|%p" -1
+git merge --ff-only side
+git merge nope
+`},
+	{"cherry-pick and revert", `
+git init -q -b main
+printf '1\n2\n3\n' > f
+git add .
+git commit -q -m base
+git checkout -q -b side
+echo s > s
+git add s
+git commit -q -m "add s"
+printf '1\nX\n3\n' > f
+git commit -qam "change f"
+git checkout -q main
+GIT_COMMITTER_DATE="@1700000500 +0000" git cherry-pick side~1
+git log --format="%h %an %ad %cd %s" -1
+git cherry-pick side~1
+git cherry-pick --skip
+git revert HEAD
+git log --format=%B -1
+printf '1\nY\n3\n' > f
+git commit -qam "main f"
+git cherry-pick side
+git status
+git status -s
+cat f
+echo resolved > f
+git add f
+git cherry-pick --continue
+git log --oneline -1
+git revert HEAD~1 --no-edit
+cat f
+git status -s
+git revert --abort
+git status -s
+git cherry-pick -x side~1
+git log --format=%B -1
+git cherry-pick --continue
+`},
 }
 
 func TestCompatibility(t *testing.T) {

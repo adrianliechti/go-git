@@ -135,6 +135,9 @@ func (r *repo) stage(specs, args []string, update, force bool) error {
 		return err
 	}
 	tracked := r.indexSide(idx)
+	for p := range unmergedPaths(idx) {
+		tracked[p] = entry{}
+	}
 	matched := make([]bool, len(specs))
 	var ignored []string
 	selected := map[string]bool{}
@@ -237,12 +240,19 @@ func (g *gitRun) rm(args []string) error {
 		return err
 	}
 	var targets []string
+	seen := map[string]bool{}
+	unmerged := unmergedPaths(idx)
 	for i, s := range specs {
 		found := false
 		for _, e := range idx.Entries {
 			if !matchPath(s, e.Name) {
 				continue
 			}
+			if seen[e.Name] {
+				found = true
+				continue
+			}
+			seen[e.Name] = true
 			if e.Name != s && !recursive && !strings.ContainsAny(s, "*?[") {
 				return fatalf("not removing '%s' recursively without -r", paths[i])
 			}
@@ -257,6 +267,9 @@ func (g *gitRun) rm(args []string) error {
 	if !force {
 		var staged, local, both []string
 		for _, p := range targets {
+			if _, conflicted := unmerged[p]; conflicted {
+				continue // removing resolves the conflict
+			}
 			ie, _ := idx.Entry(p)
 			he, inHead := headSide[p]
 			we, inWork, err := r.worktreeEntry(p)
@@ -401,6 +414,9 @@ func (g *gitRun) commit(args []string) error {
 			return err
 		}
 	}
+	if err := r.errUnmergedCommit(); err != nil {
+		return err
+	}
 	head, err := r.headCommit()
 	if err != nil {
 		return err
@@ -409,6 +425,12 @@ func (g *gitRun) commit(args []string) error {
 	var parents []plumbing.Hash
 	if head != nil {
 		parents = []plumbing.Hash{head.Hash}
+	}
+	mergeHead := r.stateCommit(mergeHeadFile)
+	picked := r.stateCommit(cherryPickFile)
+	reverted := r.stateCommit(revertFile)
+	if mergeHead != nil {
+		parents = append(parents, mergeHead.Hash)
 	}
 	if amend {
 		if head == nil {
@@ -421,7 +443,7 @@ func (g *gitRun) commit(args []string) error {
 			}
 		}
 	}
-	if !allowEmpty && !amend {
+	if !allowEmpty && !amend && mergeHead == nil {
 		idx, err := r.readIndex()
 		if err != nil {
 			return err
@@ -441,10 +463,27 @@ func (g *gitRun) commit(args []string) error {
 	}
 	msg := strings.Join(messages, "\n\n")
 	if !haveMessage {
-		if !amend || !noEdit {
+		// A prepared message is used as is with --no-edit; otherwise it is
+		// treated as if an editor returned it unchanged, which strips
+		// comment lines.
+		prepared := ""
+		for _, file := range []string{mergeMsgFile, squashMsgFile} {
+			if m, ok := r.gitFile(file); ok {
+				prepared = m
+				if !noEdit {
+					prepared = stripComments(m)
+				}
+				break
+			}
+		}
+		switch {
+		case prepared != "":
+			msg = prepared
+		case amend && noEdit:
+			msg = head.Message
+		default:
 			return fatalf("no commit message given; use -m or -F (no editor is available)")
 		}
-		msg = head.Message
 	}
 	msg = cleanupMessage(msg)
 	if msg == "" && !allowEmptyMessage {
@@ -454,8 +493,11 @@ func (g *gitRun) commit(args []string) error {
 	if err != nil {
 		return err
 	}
-	if amend {
+	switch {
+	case amend:
 		author = &head.Author
+	case picked != nil:
+		author = &picked.Author
 	}
 	committer, err := r.signature("COMMITTER")
 	if err != nil {
@@ -468,9 +510,18 @@ func (g *gitRun) commit(args []string) error {
 	if err := r.setHead(h); err != nil {
 		return err
 	}
+	r.clearOperationState()
+	_ = reverted
 	if quiet {
 		return nil
 	}
+	return r.printCommitSummary(h, amend || picked != nil)
+}
+
+// printCommitSummary prints the "[branch hash] subject" block that commit,
+// cherry-pick, and revert show. Merge commits get no diffstat.
+func (r *repo) printCommitSummary(h plumbing.Hash, showDate bool) error {
+	g := r.g
 	c, err := r.CommitObject(h)
 	if err != nil {
 		return err
@@ -483,15 +534,18 @@ func (g *gitRun) commit(args []string) error {
 		branch = "detached HEAD"
 	}
 	root := ""
-	if len(parents) == 0 {
+	if len(c.ParentHashes) == 0 {
 		root = " (root-commit)"
 	}
-	fmt.Fprintf(g.out, "[%s%s %s] %s\n", branch, root, short(h), subject(msg))
+	fmt.Fprintf(g.out, "[%s%s %s] %s\n", branch, root, short(h), subject(c.Message))
 	if ident(c.Author) != ident(c.Committer) {
 		fmt.Fprintf(g.out, " Author: %s\n", ident(c.Author))
 	}
-	if amend {
+	if showDate {
 		fmt.Fprintf(g.out, " Date: %s\n", gitDate(c.Author.When))
+	}
+	if len(c.ParentHashes) > 1 {
+		return nil
 	}
 	diffs, err := r.commitDiffs(c, nil)
 	if err != nil {
@@ -502,6 +556,39 @@ func (g *gitRun) commit(args []string) error {
 		writeModeSummary(g.out, diffs)
 	}
 	return nil
+}
+
+// stripComments drops "#" lines from a prepared message, as git's default
+// cleanup does for messages that went through the editor.
+func stripComments(msg string) string {
+	var lines []string
+	for _, l := range strings.Split(msg, "\n") {
+		if !strings.HasPrefix(l, "#") {
+			lines = append(lines, l)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// errUnmergedCommit is commit's refusal while paths are unmerged; git lists
+// the paths on stdout after the error.
+func (r *repo) errUnmergedCommit() error {
+	idx, err := r.readIndex()
+	if err != nil {
+		return err
+	}
+	un := unmergedPaths(idx)
+	if len(un) == 0 {
+		return nil
+	}
+	fmt.Fprint(r.g.err, "error: Committing is not possible because you have unmerged files.\n"+
+		"hint: Fix them up in the work tree, and then use 'git add/rm <file>'\n"+
+		"hint: as appropriate to mark resolution and make a commit.\n"+
+		"fatal: Exiting because of an unresolved conflict.\n")
+	for _, p := range sortedKeys(un) {
+		fmt.Fprintf(r.g.out, "U\t%s\n", p)
+	}
+	return &exitError{code: 128}
 }
 
 func (g *gitRun) status(args []string) error {
@@ -598,6 +685,37 @@ func (r *repo) statusName(f fileStatus) string {
 	return q(r.display(f.path))
 }
 
+// writeOperationState describes a merge, cherry-pick, or revert in progress.
+func (r *repo) writeOperationState(w io.Writer, st *repoStatus) {
+	unmerged := st.hasUnmerged()
+	if _, ok := r.gitFile(mergeHeadFile); ok {
+		if unmerged {
+			fmt.Fprint(w, "You have unmerged paths.\n  (fix conflicts and run \"git commit\")\n  (use \"git merge --abort\" to abort the merge)\n\n")
+		} else {
+			fmt.Fprint(w, "All conflicts fixed but you are still merging.\n  (use \"git commit\" to conclude merge)\n\n")
+		}
+		return
+	}
+	for _, op := range []struct{ file, verb, cmd string }{
+		{cherryPickFile, "cherry-picking", "cherry-pick"},
+		{revertFile, "reverting", "revert"},
+	} {
+		c := r.stateCommit(op.file)
+		if c == nil {
+			continue
+		}
+		fmt.Fprintf(w, "You are currently %s commit %s.\n", op.verb, short(c.Hash))
+		if unmerged {
+			fmt.Fprintf(w, "  (fix conflicts and run \"git %s --continue\")\n", op.cmd)
+		} else {
+			fmt.Fprintf(w, "  (all conflicts fixed: run \"git %s --continue\")\n", op.cmd)
+		}
+		fmt.Fprintf(w, "  (use \"git %s --skip\" to skip this patch)\n", op.cmd)
+		fmt.Fprintf(w, "  (use \"git %s --abort\" to cancel the %s operation)\n\n", op.cmd, op.cmd)
+		return
+	}
+}
+
 func ident(s object.Signature) string { return s.Name + " <" + s.Email + ">" }
 
 // writeLongStatus prints git status output; commit uses slightly different
@@ -613,6 +731,7 @@ func (r *repo) writeLongStatus(w io.Writer, st *repoStatus, forCommit bool) {
 			}
 		}
 	}
+	r.writeOperationState(w, st)
 	if st.head == nil {
 		if forCommit {
 			fmt.Fprint(w, "\nInitial commit\n\n")
@@ -623,14 +742,33 @@ func (r *repo) writeLongStatus(w io.Writer, st *repoStatus, forCommit bool) {
 	labels := map[byte]string{'A': "new file:", 'M': "modified:", 'D': "deleted:", 'R': "renamed:"}
 	if st.hasStaged() {
 		fmt.Fprintln(w, "Changes to be committed:")
-		if st.head == nil {
+		_, merging := r.gitFile(mergeHeadFile)
+		switch {
+		case merging:
+		case st.head == nil:
 			fmt.Fprintln(w, `  (use "git rm --cached <file>..." to unstage)`)
-		} else {
+		default:
 			fmt.Fprintln(w, `  (use "git restore --staged <file>..." to unstage)`)
 		}
 		for _, f := range st.tracked {
-			if f.staged != ' ' {
+			if f.staged != ' ' && f.unmerged == "" {
 				fmt.Fprintf(w, "\t%-12s%s\n", labels[f.staged], r.statusName(f))
+			}
+		}
+		fmt.Fprintln(w)
+	}
+	if st.hasUnmerged() {
+		hint := `  (use "git add <file>..." to mark resolution)`
+		for _, f := range st.tracked {
+			if f.unmerged != "" && f.unmerged != "both modified:" && f.unmerged != "both added:" {
+				hint = `  (use "git add/rm <file>..." as appropriate to mark resolution)`
+			}
+		}
+		fmt.Fprintln(w, "Unmerged paths:")
+		fmt.Fprintln(w, hint)
+		for _, f := range st.tracked {
+			if f.unmerged != "" {
+				fmt.Fprintf(w, "\t%-17s%s\n", f.unmerged, q(r.display(f.path)))
 			}
 		}
 		fmt.Fprintln(w)
@@ -646,7 +784,7 @@ func (r *repo) writeLongStatus(w io.Writer, st *repoStatus, forCommit bool) {
 		fmt.Fprintf(w, "  (use \"git %s <file>...\" to update what will be committed)\n", verb)
 		fmt.Fprintln(w, `  (use "git restore <file>..." to discard changes in working directory)`)
 		for _, f := range st.tracked {
-			if f.unstaged != ' ' {
+			if f.unstaged != ' ' && f.unmerged == "" {
 				fmt.Fprintf(w, "\t%-12s%s\n", labels[f.unstaged], q(r.display(f.path)))
 			}
 		}
@@ -670,7 +808,7 @@ func (r *repo) writeLongStatus(w io.Writer, st *repoStatus, forCommit bool) {
 	}
 	switch {
 	case st.hasStaged():
-	case st.hasUnstaged():
+	case st.hasUnstaged() || st.hasUnmerged():
 		fmt.Fprintln(w, `no changes added to commit (use "git add" and/or "git commit -a")`)
 	case len(st.untracked) > 0:
 		fmt.Fprintln(w, `nothing added to commit but untracked files present (use "git add" to track)`)
@@ -707,6 +845,9 @@ func (r *repo) createBranch(name, start string) error {
 // switchBranch implements both git switch and branch-mode git checkout.
 func (r *repo) switchBranch(name string, create bool, start string, detach bool, quiet bool) error {
 	g := r.g
+	if err := r.errNeedsMerge(); err != nil {
+		return err
+	}
 	current, err := r.branchName()
 	if err != nil {
 		return err
@@ -1136,72 +1277,6 @@ func (g *gitRun) reset(args []string) error {
 			}
 		}
 	}
-	return nil
-}
-
-// merge supports fast-forward merges only; go-git cannot create merge commits
-// with conflict resolution.
-func (g *gitRun) merge(args []string) error {
-	quiet := false
-	var revs []string
-	for _, a := range args {
-		switch a {
-		case "--ff-only", "--ff", "--stat":
-		case "-q", "--quiet":
-			quiet = true
-		default:
-			if strings.HasPrefix(a, "-") {
-				return usagef("error: unknown option `%s'", strings.TrimLeft(a, "-"))
-			}
-			revs = append(revs, a)
-		}
-	}
-	if len(revs) != 1 {
-		return fatalf("this git supports merging exactly one branch")
-	}
-	r, err := g.openRepo()
-	if err != nil {
-		return err
-	}
-	target, err := r.resolveCommit(revs[0])
-	if err != nil {
-		return failf(1, "merge: %s - not something we can merge\n", revs[0])
-	}
-	head, err := r.headCommit()
-	if err != nil {
-		return err
-	}
-	if head != nil && (head.Hash == target.Hash || mustAncestor(target, head)) {
-		fmt.Fprintln(g.out, "Already up to date.")
-		return nil
-	}
-	if head != nil && !mustAncestor(head, target) {
-		return fatalf("Not possible to fast-forward, aborting.")
-	}
-	if err := r.switchTo(target, "merge", false); err != nil {
-		return err
-	}
-	if err := r.setHead(target.Hash); err != nil {
-		return err
-	}
-	if quiet || head == nil {
-		return nil
-	}
-	fmt.Fprintf(g.out, "Updating %s..%s\nFast-forward\n", short(head.Hash), short(target.Hash))
-	a, err := r.treeSide(head)
-	if err != nil {
-		return err
-	}
-	b, err := r.treeSide(target)
-	if err != nil {
-		return err
-	}
-	diffs, err := computeDiffs(changes(a, b, nil), false)
-	if err != nil {
-		return err
-	}
-	writeStat(g.out, diffs)
-	writeModeSummary(g.out, diffs)
 	return nil
 }
 

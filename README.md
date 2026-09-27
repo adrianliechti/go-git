@@ -59,7 +59,8 @@ PATH=$PWD/bin:$PATH git init -q demo && cd demo && git status
 merged stdout/stderr and exit status, and the two transcripts must be
 identical, including commit and tree hashes. The scenarios cover commits,
 status (long, short, porcelain, ignored), diffs and stats, renames, path
-quoting, branches and upstream tracking, fast-forward merges, reset/restore,
+quoting, branches and upstream tracking, fast-forward and three-way merges
+with conflicts, cherry-pick, revert, reset/restore,
 mv, rm, clean, tags, decorations, subdirectories, log formats, ignore rules,
 config, amend, clone/fetch/push/pull between local and bare repositories, and
 error messages. They were written against git 2.54. `http_test.go` clones,
@@ -71,14 +72,16 @@ go test ./...
 
 Supported commands: `init`, `clone`, `add`, `mv`, `rm`, `restore`, `clean`,
 `commit`, `status`, `log`, `show`, `diff`, `branch`, `checkout`, `switch`,
-`reset`, `merge`, `tag`, `remote`, `fetch`, `pull`, `push`, `config`,
+`reset`, `merge`, `merge-base`, `cherry-pick`, `revert`, `tag`, `remote`,
+`fetch`, `pull`, `push`, `config`,
 `rev-parse`, `cat-file`, `ls-files`, `hash-object`, `help`, `version`. Only the
 common options of each are implemented; `git help <command>` lists them.
 
 Known differences from git:
 
-- `merge` and `pull` only fast-forward; there are no merge commits yet.
-- No `stash`, `rebase`, `cherry-pick`, `revert`, `blame`, `grep`, reflog.
+- Merges follow merge-ort's per-path rules and xdiff's conflict output, but
+  without rename detection across branches or recursive merge bases.
+- No `stash`, `rebase`, `blame`, `grep`, reflog, or `log --graph` yet.
 - No editor, pager, hooks, or colors; `-m`/`-F` are required for messages.
 - Diffs use Myers with git's slide-down compaction but without the indent
   heuristic, so hunk placement can differ for indented code.

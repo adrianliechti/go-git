@@ -1072,7 +1072,7 @@ func (g *gitRun) pull(args []string) error {
 		if pullRebase == "true" {
 			return fatalf("pull --rebase is not supported by this git")
 		}
-		return r.mergeCommit(target, "Merge branch '"+merge.Short()+"' of "+ep.url, quiet)
+		return r.threeWayMerge(target, "Merge branch '"+merge.Short()+"' of "+displayURL(ep.url), mergeOptions{label: shortRef(r.trackingRef(remoteName, merge)), quiet: quiet})
 	}
 	return r.fastForward(head, target, quiet)
 }
@@ -1117,11 +1117,6 @@ func (r *repo) fastForward(head, target *object.Commit, quiet bool) error {
 	writeStat(g.out, diffs)
 	writeModeSummary(g.out, diffs)
 	return nil
-}
-
-// mergeCommit is replaced by the three-way merge implementation.
-func (r *repo) mergeCommit(target *object.Commit, msg string, quiet bool) error {
-	return fatalf("Not possible to fast-forward, aborting.")
 }
 
 // Remote management

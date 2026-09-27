@@ -149,12 +149,15 @@ var commands = map[string]func(*gitRun, []string) error{
 	"push":        (*gitRun).push,
 	"pull":        (*gitRun).pull,
 	"remote":      (*gitRun).remoteCmd,
+	"merge-base":  (*gitRun).mergeBaseCmd,
+	"cherry-pick": (*gitRun).cherryPick,
+	"revert":      (*gitRun).revert,
 }
 
 // Commands that real git has but this implementation deliberately omits.
 var unsupported = []string{
-	"am", "apply", "bisect", "blame", "cherry-pick", "gc", "grep", "notes",
-	"rebase", "reflog", "revert", "stash", "submodule", "worktree",
+	"am", "apply", "bisect", "blame", "gc", "grep", "notes",
+	"rebase", "reflog", "stash", "submodule", "worktree",
 }
 
 func (g *gitRun) main(args []string) int {
@@ -454,7 +457,10 @@ func (r *repo) readIndex() (*index.Index, error) {
 }
 
 func (r *repo) writeIndex(idx *index.Index) error {
-	sort.Slice(idx.Entries, func(i, j int) bool { return idx.Entries[i].Name < idx.Entries[j].Name })
+	sort.Slice(idx.Entries, func(i, j int) bool {
+		a, b := idx.Entries[i], idx.Entries[j]
+		return a.Name < b.Name || (a.Name == b.Name && a.Stage < b.Stage)
+	})
 	return r.Storer.SetIndex(idx)
 }
 

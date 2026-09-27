@@ -18,7 +18,7 @@ var helpGroups = []struct {
 	{"start a working area", []string{"clone", "init"}},
 	{"work on the current change", []string{"add", "mv", "restore", "rm"}},
 	{"examine the history and state", []string{"diff", "log", "show", "status"}},
-	{"grow, mark and tweak your common history", []string{"branch", "commit", "merge", "reset", "switch", "tag"}},
+	{"grow, mark and tweak your common history", []string{"branch", "cherry-pick", "commit", "merge", "reset", "revert", "switch", "tag"}},
 	{"collaborate", []string{"fetch", "pull", "push"}},
 }
 
@@ -64,8 +64,8 @@ var help = map[string]commandHelp{
 	"ls-files": {"Show information about files in the index",
 		[]string{"git ls-files [-s | --stage] [--] [<file>...]"}, nil},
 	"merge": {"Join two or more development histories together",
-		[]string{"git merge [<options>] <commit>"},
-		[][2]string{{"--ff-only", "abort if fast-forward is not possible"}, {"-q, --quiet", "be more quiet"}}},
+		[]string{"git merge [<options>] <commit>", "git merge --abort", "git merge --continue"},
+		[][2]string{{"--ff-only", "abort if fast-forward is not possible"}, {"--no-ff", "always create a merge commit"}, {"--squash", "create a single commit instead of doing a merge"}, {"--no-commit", "perform the merge but do not commit"}, {"-m <message>", "merge commit message"}, {"-q, --quiet", "be more quiet"}}},
 	"mv": {"Move or rename a file, a directory, or a symlink",
 		[]string{"git mv [<options>] <source>... <destination>"},
 		[][2]string{{"-f, --force", "force move/rename even if target exists"}, {"-k", "skip move/rename errors"}, {"-n, --dry-run", "dry run"}}},
@@ -100,6 +100,14 @@ var help = map[string]commandHelp{
 		[]string{"git clean [-d] [-f] [-n] [-x | -X] [--] [<pathspec>...]"},
 		[][2]string{{"-n, --dry-run", "dry run"}, {"-f, --force", "force"}, {"-d", "remove whole directories"}, {"-x", "remove ignored files, too"}, {"-X", "remove only ignored files"}}},
 	"version": {"Display version information about Git", []string{"git version"}, nil},
+	"merge-base": {"Find as good common ancestors as possible for a merge",
+		[]string{"git merge-base <commit> <commit>", "git merge-base --is-ancestor <commit> <commit>"}, nil},
+	"cherry-pick": {"Apply the changes introduced by some existing commits",
+		[]string{"git cherry-pick [-n] [-x] <commit>...", "git cherry-pick (--continue | --skip | --abort)"},
+		[][2]string{{"-n, --no-commit", "don't automatically commit"}, {"-x", "append commit name"}}},
+	"revert": {"Revert some existing commits",
+		[]string{"git revert [-n] [--no-edit] <commit>...", "git revert (--continue | --skip | --abort)"},
+		[][2]string{{"-n, --no-commit", "don't automatically commit"}}},
 }
 
 func (g *gitRun) writeMainHelp() {

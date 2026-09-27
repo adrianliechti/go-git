@@ -78,8 +78,9 @@ func dirOrDot(dir string) string {
 
 type fileStatus struct {
 	path             string
-	staged, unstaged byte   // ' ', 'A', 'M', 'D', 'R'
+	staged, unstaged byte   // ' ', 'A', 'M', 'D', 'R'; 'U' etc. when unmerged
 	oldPath          string // source of a staged rename
+	unmerged         string // long-status label of an unmerged path
 }
 
 type repoStatus struct {
@@ -92,7 +93,16 @@ type repoStatus struct {
 
 func (s *repoStatus) hasStaged() bool {
 	for _, f := range s.tracked {
-		if f.staged != ' ' {
+		if f.staged != ' ' && f.unmerged == "" {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *repoStatus) hasUnmerged() bool {
+	for _, f := range s.tracked {
+		if f.unmerged != "" {
 			return true
 		}
 	}
@@ -101,7 +111,7 @@ func (s *repoStatus) hasStaged() bool {
 
 func (s *repoStatus) hasUnstaged() bool {
 	for _, f := range s.tracked {
-		if f.unstaged != ' ' {
+		if f.unstaged != ' ' && f.unmerged == "" {
 			return true
 		}
 	}
@@ -156,6 +166,14 @@ func (r *repo) computeStatus(specs []string, collapse, withUntracked bool) (*rep
 			get(c.path).unstaged = changeCode(c)
 		}
 	}
+	// Unmerged paths replace whatever the stage-0 comparison found.
+	for p, stages := range unmergedPaths(idx) {
+		if !matchAny(specs, p) {
+			continue
+		}
+		code, label := unmergedCode(stages)
+		byPath[p] = &fileStatus{path: p, staged: code[0], unstaged: code[1], unmerged: label}
+	}
 	for _, f := range byPath {
 		st.tracked = append(st.tracked, *f)
 	}
@@ -171,6 +189,10 @@ func (r *repo) computeStatus(specs []string, collapse, withUntracked bool) (*rep
 	files, err := r.walkFiles("", m, false)
 	if err != nil {
 		return nil, err
+	}
+	unmerged := unmergedPaths(idx)
+	for p := range unmerged {
+		indexSide[p] = entry{}
 	}
 	trackedDirs := map[string]bool{"": true}
 	for p := range indexSide {
@@ -307,12 +329,24 @@ func (r *repo) removeFile(p string) error {
 	return nil
 }
 
+// setEntry stores p at stage 0, resolving any conflict stages.
 func setEntry(idx *index.Index, p string, e entry, info os.FileInfo) {
 	var ie *index.Entry
-	if found, err := idx.Entry(p); err == nil {
-		ie = found
-	} else {
-		ie = idx.Add(p)
+	kept := idx.Entries[:0]
+	for _, x := range idx.Entries {
+		switch {
+		case x.Name != p:
+		case x.Stage == stageMerged:
+			ie = x
+		default:
+			continue
+		}
+		kept = append(kept, x)
+	}
+	idx.Entries = kept
+	if ie == nil {
+		ie = &index.Entry{Name: p}
+		idx.Entries = append(idx.Entries, ie)
 	}
 	ie.Hash, ie.Mode = e.hash, e.mode
 	ie.Size = 0
@@ -322,8 +356,37 @@ func setEntry(idx *index.Index, p string, e entry, info os.FileInfo) {
 	}
 }
 
+// stageMerged is the on-disk stage of a normal entry. go-git's
+// index.Merged constant is 1, which collides with the base stage.
+const stageMerged index.Stage = 0
+
+// removeEntry drops p from the index at every stage.
 func removeEntry(idx *index.Index, p string) {
-	idx.Remove(p)
+	kept := idx.Entries[:0]
+	for _, x := range idx.Entries {
+		if x.Name != p {
+			kept = append(kept, x)
+		}
+	}
+	idx.Entries = kept
+}
+
+// addStage adds a conflict stage (1 base, 2 ours, 3 theirs) for p.
+func addStage(idx *index.Index, p string, e entry, stage int) {
+	idx.Entries = append(idx.Entries, &index.Entry{Name: p, Hash: e.hash, Mode: e.mode, Stage: index.Stage(stage)})
+}
+
+// unmergedPaths returns the conflict stages present for each unmerged path.
+func unmergedPaths(idx *index.Index) map[string][4]bool {
+	out := map[string][4]bool{}
+	for _, e := range idx.Entries {
+		if e.Stage != stageMerged {
+			s := out[e.Name]
+			s[e.Stage] = true
+			out[e.Name] = s
+		}
+	}
+	return out
 }
 
 // writeBlob stores data as a blob and returns its entry.
@@ -487,6 +550,9 @@ func (r *repo) resetHard(target *object.Commit) error {
 		for p := range s {
 			paths[p] = true
 		}
+	}
+	for p := range unmergedPaths(idx) {
+		paths[p] = true
 	}
 	idx.Entries = nil
 	for p := range paths {
