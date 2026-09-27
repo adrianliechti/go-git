@@ -128,3 +128,13 @@ func unmergedCode(s [4]bool) (string, string) {
 	}
 	return "DD", "both deleted:"
 }
+
+// inOperation reports whether a merge, cherry-pick, or revert is underway.
+func (r *repo) inOperation() bool {
+	for _, f := range []string{mergeHeadFile, cherryPickFile, revertFile} {
+		if _, ok := r.gitFile(f); ok {
+			return true
+		}
+	}
+	return false
+}

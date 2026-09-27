@@ -577,4 +577,3 @@ func (r *repo) resetHard(target *object.Commit) error {
 	}
 	return r.writeIndex(idx)
 }
-

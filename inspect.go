@@ -43,8 +43,8 @@ type logFormat struct {
 	sides     map[plumbing.Hash]byte // '<' or '>' for --left-right
 	followed  map[plumbing.Hash][]*fileDiff
 	walkLogs  bool
-	selector  string       // "HEAD@{0}" while printing a reflog entry
-	logEntry  *reflogEntry // the entry being printed
+	selector  string                     // "HEAD@{0}" while printing a reflog entry
+	logEntry  *reflogEntry               // the entry being printed
 	deco      map[plumbing.Hash][]string // loaded lazily
 	count     int                        // -1 for unlimited
 	reverse   bool

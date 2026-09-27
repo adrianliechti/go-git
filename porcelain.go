@@ -782,6 +782,9 @@ func (r *repo) writeLongStatus(w io.Writer, st *repoStatus, forCommit bool) {
 			}
 		}
 		fmt.Fprintln(w, "Unmerged paths:")
+		if !r.inOperation() && st.head != nil {
+			fmt.Fprintln(w, `  (use "git restore --staged <file>..." to unstage)`)
+		}
 		fmt.Fprintln(w, hint)
 		for _, f := range st.tracked {
 			if f.unmerged != "" {
@@ -1091,8 +1094,16 @@ func (r *repo) checkoutPaths(source string, paths []string) error {
 			return err
 		}
 	}
+	unmerged := unmergedPaths(idx)
 	for i, s := range specs {
 		found := false
+		if source == "" {
+			for p := range unmerged {
+				if matchPath(s, p) {
+					return failf(1, "error: path '%s' is unmerged\n", p)
+				}
+			}
+		}
 		for p, e := range from {
 			if !matchPath(s, p) {
 				continue

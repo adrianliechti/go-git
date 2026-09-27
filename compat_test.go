@@ -899,6 +899,63 @@ cd src && git commit -q --amend --allow-empty -m three2
 cd dst && git fetch
 cd dst && git reflog show origin/main -1
 `},
+	{"stash", `
+git init -q -b main
+printf '1\n2\n3\n' > a
+echo b > b
+git add .
+git commit -q -m one
+git stash
+echo x >> a
+echo new > n
+git add n
+echo u > u
+git stash
+git status -s
+git stash list
+git stash show
+git stash show -p
+git cat-file -p stash@{0}
+git log --format="%h %p %s" -3 stash
+git stash apply
+git status -s
+git reset -q --hard
+git stash pop
+git stash list
+git stash push -m "my message" a
+git stash list
+git status -s
+git stash -u
+git status -s
+git stash list
+git log --format="%h %p %s" -1 stash@{0}^3
+git stash show --include-untracked
+git stash pop stash@{1}
+git stash drop
+git stash list
+git stash pop
+git stash branch newbranch
+echo y >> a
+git stash -q
+echo conflict > a
+git commit -qam "change a"
+git stash pop
+git status -s
+git stash list
+git checkout -q -- a
+git reset -q --hard
+git stash branch fromstash
+git status -s
+git stash list
+echo k >> b
+git add b
+echo w >> a
+git stash --keep-index
+git status -s
+git stash show -p
+git stash clear
+git stash list
+`},
 }
 
 func TestCompatibility(t *testing.T) {

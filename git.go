@@ -255,6 +255,7 @@ var commands = map[string]func(*gitRun, []string) error{
 	"ls-files":    (*gitRun).lsFiles,
 	"hash-object": (*gitRun).hashObject,
 	"reflog":      (*gitRun).reflogCmd,
+	"stash":       (*gitRun).stash,
 	"version":     (*gitRun).version,
 	"mv":          (*gitRun).mv,
 	"clean":       (*gitRun).clean,
@@ -271,7 +272,7 @@ var commands = map[string]func(*gitRun, []string) error{
 // Commands that real git has but this implementation deliberately omits.
 var unsupported = []string{
 	"am", "apply", "bisect", "blame", "gc", "grep", "notes",
-	"rebase", "stash", "submodule", "worktree",
+	"rebase", "submodule", "worktree",
 }
 
 func (g *gitRun) main(args []string) int {
@@ -639,6 +640,15 @@ func (r *repo) resolveRev(rev string) (plumbing.Hash, error) {
 			return r.resolveReflog(base, spec, rest, orig)
 		}
 	}
+	// Parent and ancestry suffixes (~n, ^n, ^{...}) are applied here;
+	// go-git only resolves the base name.
+	if i := strings.IndexAny(rev, "~^"); i > 0 {
+		h, err := r.resolveRev(rev[:i])
+		if err != nil {
+			return plumbing.ZeroHash, errAmbiguous(orig)
+		}
+		return r.applySuffixes(h, rev[i:], orig)
+	}
 	// git needs at least four hex digits for an abbreviated hash; go-git
 	// would match "c" against any hash starting with c.
 	if len(rev) < 4 && isHex(rev) {
@@ -654,6 +664,90 @@ func (r *repo) resolveRev(rev string) (plumbing.Hash, error) {
 		return plumbing.ZeroHash, errAmbiguous(orig)
 	}
 	return *h, nil
+}
+
+// applySuffixes walks ~n and ^n from h; ^{} and ^{commit} peel tags.
+func (r *repo) applySuffixes(h plumbing.Hash, ops, orig string) (plumbing.Hash, error) {
+	for len(ops) > 0 {
+		op := ops[0]
+		ops = ops[1:]
+		if op == '^' && strings.HasPrefix(ops, "{") {
+			end := strings.IndexByte(ops, '}')
+			if end < 0 {
+				return plumbing.ZeroHash, errAmbiguous(orig)
+			}
+			switch ops[1:end] {
+			case "", "commit":
+				c, err := r.peelCommit(h)
+				if err != nil {
+					return plumbing.ZeroHash, errAmbiguous(orig)
+				}
+				h = c
+			case "tree":
+				c, err := r.CommitObject(h)
+				if err != nil {
+					return plumbing.ZeroHash, errAmbiguous(orig)
+				}
+				h = c.TreeHash
+			default:
+				return plumbing.ZeroHash, errAmbiguous(orig)
+			}
+			ops = ops[end+1:]
+			continue
+		}
+		n, digits := 1, 0
+		for digits < len(ops) && ops[digits] >= '0' && ops[digits] <= '9' {
+			digits++
+		}
+		if digits > 0 {
+			n, _ = strconv.Atoi(ops[:digits])
+			ops = ops[digits:]
+		}
+		ch, err := r.peelCommit(h)
+		if err != nil {
+			return plumbing.ZeroHash, errAmbiguous(orig)
+		}
+		c, err := r.CommitObject(ch)
+		if err != nil {
+			return plumbing.ZeroHash, errAmbiguous(orig)
+		}
+		if op == '~' {
+			for ; n > 0; n-- {
+				if len(c.ParentHashes) == 0 {
+					return plumbing.ZeroHash, errAmbiguous(orig)
+				}
+				if c, err = r.CommitObject(c.ParentHashes[0]); err != nil {
+					return plumbing.ZeroHash, err
+				}
+			}
+			h = c.Hash
+			continue
+		}
+		if n == 0 {
+			h = c.Hash
+			continue
+		}
+		if n > len(c.ParentHashes) {
+			return plumbing.ZeroHash, errAmbiguous(orig)
+		}
+		h = c.ParentHashes[n-1]
+	}
+	return h, nil
+}
+
+// peelCommit follows annotated tags to a commit.
+func (r *repo) peelCommit(h plumbing.Hash) (plumbing.Hash, error) {
+	for range 10 {
+		if _, err := r.CommitObject(h); err == nil {
+			return h, nil
+		}
+		t, err := r.TagObject(h)
+		if err != nil {
+			return plumbing.ZeroHash, err
+		}
+		h = t.Target
+	}
+	return plumbing.ZeroHash, fmt.Errorf("tag chain too long")
 }
 
 func isHex(s string) bool {

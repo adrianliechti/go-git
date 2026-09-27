@@ -16,7 +16,7 @@ var helpGroups = []struct {
 	commands []string
 }{
 	{"start a working area", []string{"clone", "init"}},
-	{"work on the current change", []string{"add", "mv", "restore", "rm"}},
+	{"work on the current change", []string{"add", "mv", "restore", "rm", "stash"}},
 	{"examine the history and state", []string{"diff", "log", "show", "status"}},
 	{"grow, mark and tweak your common history", []string{"branch", "cherry-pick", "commit", "merge", "reset", "revert", "switch", "tag"}},
 	{"collaborate", []string{"fetch", "pull", "push"}},
@@ -100,6 +100,10 @@ var help = map[string]commandHelp{
 		[]string{"git clean [-d] [-f] [-n] [-x | -X] [--] [<pathspec>...]"},
 		[][2]string{{"-n, --dry-run", "dry run"}, {"-f, --force", "force"}, {"-d", "remove whole directories"}, {"-x", "remove ignored files, too"}, {"-X", "remove only ignored files"}}},
 	"version": {"Display version information about Git", []string{"git version"}, nil},
+	"stash": {"Stash the changes in a dirty working directory away",
+		[]string{"git stash [push [-k] [-u | -a] [-q] [-m <message>] [--] [<pathspec>...]]", "git stash list",
+			"git stash show [-p] [-u] [<stash>]", "git stash (pop | apply) [--index] [-q] [<stash>]",
+			"git stash drop [-q] [<stash>]", "git stash branch <branchname> [<stash>]", "git stash clear"}, nil},
 	"reflog": {"Manage reflog information",
 		[]string{"git reflog [show] [<log-options>] [<ref>]", "git reflog exists <ref>"}, nil},
 	"merge-base": {"Find as good common ancestors as possible for a merge",
