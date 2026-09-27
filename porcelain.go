@@ -1581,7 +1581,7 @@ func (g *gitRun) config(args []string) error {
 			}
 		}
 		if !global {
-			for _, kv := range g.overrides {
+			for _, kv := range g.commandConfig() {
 				k, v, hasValue := strings.Cut(kv, "=")
 				if sec, sub, name, ok := splitKey(k); ok {
 					k = strings.ToLower(sec) + "." + strings.ToLower(name)

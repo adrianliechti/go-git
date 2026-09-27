@@ -128,10 +128,9 @@ type gitRun struct {
 	reflogAction   string   // command line for reflog messages, e.g. "fetch -q"
 }
 
-// configOverride returns the last value for key from GIT_CONFIG_COUNT
-// variables or -c options, which take precedence in that order.
-func (g *gitRun) configOverride(key string) (string, bool) {
-	value, found := "", false
+// commandConfig lists "name=value" settings from GIT_CONFIG_COUNT
+// variables followed by -c options.
+func (g *gitRun) commandConfig() []string {
 	var pairs []string
 	if n, err := strconv.Atoi(g.envs["GIT_CONFIG_COUNT"]); err == nil {
 		for i := 0; i < n; i++ {
@@ -139,7 +138,14 @@ func (g *gitRun) configOverride(key string) (string, bool) {
 			pairs = append(pairs, k+"="+v)
 		}
 	}
-	for _, kv := range append(pairs, g.overrides...) {
+	return append(pairs, g.overrides...)
+}
+
+// configOverride returns the last value for key from GIT_CONFIG_COUNT
+// variables or -c options, which take precedence in that order.
+func (g *gitRun) configOverride(key string) (string, bool) {
+	value, found := "", false
+	for _, kv := range g.commandConfig() {
 		k, v, hasValue := strings.Cut(kv, "=")
 		if !hasValue {
 			v = "true" // "-c name" alone means true
