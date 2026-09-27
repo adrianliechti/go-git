@@ -128,8 +128,3 @@ func unmergedCode(s [4]bool) (string, string) {
 	}
 	return "DD", "both deleted:"
 }
-
-// resolveReflog resolves name@{n}; reflogs are added separately.
-func (r *repo) resolveReflog(name, spec, rest, orig string) (plumbing.Hash, error) {
-	return plumbing.ZeroHash, errAmbiguous(orig)
-}

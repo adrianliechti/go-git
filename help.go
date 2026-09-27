@@ -100,6 +100,8 @@ var help = map[string]commandHelp{
 		[]string{"git clean [-d] [-f] [-n] [-x | -X] [--] [<pathspec>...]"},
 		[][2]string{{"-n, --dry-run", "dry run"}, {"-f, --force", "force"}, {"-d", "remove whole directories"}, {"-x", "remove ignored files, too"}, {"-X", "remove only ignored files"}}},
 	"version": {"Display version information about Git", []string{"git version"}, nil},
+	"reflog": {"Manage reflog information",
+		[]string{"git reflog [show] [<log-options>] [<ref>]", "git reflog exists <ref>"}, nil},
 	"merge-base": {"Find as good common ancestors as possible for a merge",
 		[]string{"git merge-base <commit> <commit>", "git merge-base --is-ancestor <commit> <commit>"}, nil},
 	"cherry-pick": {"Apply the changes introduced by some existing commits",

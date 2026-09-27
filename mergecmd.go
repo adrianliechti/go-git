@@ -10,6 +10,7 @@ import (
 
 type mergeOptions struct {
 	label    string // theirs in conflict markers
+	action   string // reflog action, e.g. "merge feature" or "pull"
 	noCommit bool
 	squash   bool
 	noFF     bool
@@ -84,7 +85,7 @@ func (g *gitRun) merge(args []string) error {
 	if err != nil {
 		return failf(1, "merge: %s - not something we can merge\n", revs[0])
 	}
-	opts.label = revs[0]
+	opts.label, opts.action = revs[0], "merge "+revs[0] // git logs the merged names, not the options
 	head, err := r.headCommit()
 	if err != nil {
 		return err
@@ -100,7 +101,7 @@ func (g *gitRun) merge(args []string) error {
 		if opts.squash && head != nil {
 			return r.squashFastForward(head, target)
 		}
-		return r.fastForward(head, target, opts.quiet)
+		return r.fastForward(head, target, opts.quiet, opts.action)
 	case ffOnly:
 		return fatalf("Not possible to fast-forward, aborting.")
 	}
@@ -203,7 +204,7 @@ func (r *repo) threeWayMerge(target *object.Commit, message string, opts mergeOp
 	if err != nil {
 		return err
 	}
-	if err := r.setHead(h); err != nil {
+	if err := r.setHead(h, opts.action+": Merge made by the 'ort' strategy."); err != nil {
 		return err
 	}
 	if opts.quiet {
@@ -525,7 +526,7 @@ func (r *repo) finishPick(c *object.Commit, revert bool) error {
 	if err != nil {
 		return err
 	}
-	if err := r.setHead(h); err != nil {
+	if err := r.setHead(h, cmd+": "+subject(msg)); err != nil {
 		return err
 	}
 	r.clearOperationState()

@@ -123,6 +123,7 @@ type gitRun struct {
 	disableNetwork bool
 	httpClient     *http.Client
 	overrides      []string // -c name=value, in order
+	reflogAction   string   // command line for reflog messages, e.g. "fetch -q"
 }
 
 // configOverride returns the last -c value for key.
@@ -253,6 +254,7 @@ var commands = map[string]func(*gitRun, []string) error{
 	"cat-file":    (*gitRun).catFile,
 	"ls-files":    (*gitRun).lsFiles,
 	"hash-object": (*gitRun).hashObject,
+	"reflog":      (*gitRun).reflogCmd,
 	"version":     (*gitRun).version,
 	"mv":          (*gitRun).mv,
 	"clean":       (*gitRun).clean,
@@ -269,7 +271,7 @@ var commands = map[string]func(*gitRun, []string) error{
 // Commands that real git has but this implementation deliberately omits.
 var unsupported = []string{
 	"am", "apply", "bisect", "blame", "gc", "grep", "notes",
-	"rebase", "reflog", "stash", "submodule", "worktree",
+	"rebase", "stash", "submodule", "worktree",
 }
 
 func (g *gitRun) main(args []string) int {
@@ -357,6 +359,7 @@ func (g *gitRun) main(args []string) int {
 		fmt.Fprintf(g.err, "git: '%s' is not a git command. See 'git --help'.\n", name)
 		return 1
 	}
+	g.reflogAction = strings.Join(args, " ")
 	err := run(g, args[1:])
 	var exit *exitError
 	switch {
@@ -719,6 +722,44 @@ func cleanupMessage(msg string) string {
 		return ""
 	}
 	return strings.Join(lines, "\n") + "\n"
+}
+
+// splitFlags expands clusters of short options such as "-qb name" into
+// "-q -b name". flags lists the letters accepted; valued those taking a
+// value, which may be attached ("-bname"). Unknown clusters are kept.
+func splitFlags(args []string, flags, valued string) []string {
+	var out []string
+	for i, a := range args {
+		if a == "--" {
+			return append(out, args[i:]...)
+		}
+		if len(a) < 3 || a[0] != '-' || a[1] == '-' {
+			out = append(out, a)
+			continue
+		}
+		var parts []string
+		ok := true
+		for j := 1; j < len(a); j++ {
+			c := a[j]
+			if strings.IndexByte(flags+valued, c) < 0 {
+				ok = false
+				break
+			}
+			parts = append(parts, "-"+string(c))
+			if strings.IndexByte(valued, c) >= 0 {
+				if j+1 < len(a) {
+					parts = append(parts, a[j+1:])
+				}
+				break
+			}
+		}
+		if ok {
+			out = append(out, parts...)
+		} else {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // Identity and configuration

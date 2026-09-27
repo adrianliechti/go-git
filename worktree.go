@@ -578,15 +578,3 @@ func (r *repo) resetHard(target *object.Commit) error {
 	return r.writeIndex(idx)
 }
 
-// setHead moves the current branch (or detached HEAD) to h.
-func (r *repo) setHead(h plumbing.Hash) error {
-	ref, err := r.Storer.Reference(plumbing.HEAD)
-	if err != nil {
-		return err
-	}
-	name := plumbing.HEAD
-	if ref.Type() == plumbing.SymbolicReference {
-		name = ref.Target()
-	}
-	return r.Storer.SetReference(plumbing.NewHashReference(name, h))
-}

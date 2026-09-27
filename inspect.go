@@ -42,6 +42,9 @@ type logFormat struct {
 	filter    logFilter
 	sides     map[plumbing.Hash]byte // '<' or '>' for --left-right
 	followed  map[plumbing.Hash][]*fileDiff
+	walkLogs  bool
+	selector  string       // "HEAD@{0}" while printing a reflog entry
+	logEntry  *reflogEntry // the entry being printed
 	deco      map[plumbing.Hash][]string // loaded lazily
 	count     int                        // -1 for unlimited
 	reverse   bool
@@ -81,6 +84,8 @@ func parseLogArgs(args []string) (*logFormat, error) {
 			f.reverse = true
 		case a == "--all":
 			f.all = true
+		case a == "-g" || a == "--walk-reflogs":
+			f.walkLogs = true
 		case a == "--graph":
 			f.graphMode, f.topo = true, true
 		case a == "--topo-order":
@@ -146,6 +151,9 @@ func (g *gitRun) log(args []string) error {
 	specs, err := r.pathspecs(f.paths)
 	if err != nil {
 		return err
+	}
+	if f.walkLogs {
+		return r.logReflog(f)
 	}
 	if err := r.splitRevsAndPaths(f); err != nil {
 		return err
@@ -261,6 +269,38 @@ func (r *repo) followDiffs(c *object.Commit, p *string) ([]*fileDiff, error) {
 		}
 	}
 	return nil, nil
+}
+
+// logReflog prints reflog entries as commits, like git log -g.
+func (r *repo) logReflog(f *logFormat) error {
+	rev := "HEAD"
+	if len(f.revs) > 0 {
+		rev = f.revs[0]
+	}
+	w, err := r.reflogWalk(rev)
+	if err != nil {
+		return err
+	}
+	if len(w.entries) == 0 && len(f.revs) > 0 {
+		return errAmbiguous(rev)
+	}
+	shown := 0
+	for i, e := range w.entries {
+		if f.count >= 0 && shown >= f.count {
+			break
+		}
+		c, err := r.CommitObject(e.new)
+		if err != nil {
+			continue
+		}
+		entry := e
+		f.selector, f.logEntry = fmt.Sprintf("%s@{%d}", w.display, i), &entry
+		if err := r.writeCommit(r.g.out, c, f, nil, shown); err != nil {
+			return err
+		}
+		shown++
+	}
+	return nil
 }
 
 // walk selects commits like git's default revision walk: a queue ordered by
@@ -471,10 +511,16 @@ func (r *repo) commitText(c *object.Commit, f *logFormat) string {
 			b.WriteString("\n")
 		}
 	}
+	reflog := func() {
+		if f.logEntry != nil {
+			fmt.Fprintf(&b, "Reflog: %s (%s)\nReflog message: %s\n", f.selector, f.logEntry.who, f.logEntry.msg)
+		}
+	}
 	switch f.kind {
 	case "medium":
 		fmt.Fprintf(&b, "commit %s%s%s\n", mark, hash, deco)
 		merge()
+		reflog()
 		fmt.Fprintf(&b, "Author: %s\nDate:   %s\n\n", ident(c.Author), formatDate(c.Author.When, f.dateMode))
 		b.WriteString(indentMessage(c.Message))
 	case "short":
@@ -511,6 +557,10 @@ func (r *repo) commitText(c *object.Commit, f *logFormat) string {
 		h := c.Hash.String()
 		if f.kind == "oneline" || f.abbrev {
 			h = f.short(c.Hash)
+		}
+		if f.logEntry != nil {
+			fmt.Fprintf(&b, "%s%s%s %s: %s", mark, h, deco, f.selector, f.logEntry.msg)
+			break
 		}
 		fmt.Fprintf(&b, "%s%s%s %s", mark, h, deco, subject(c.Message))
 	case "format", "tformat":
@@ -879,6 +929,20 @@ func expandFormat(tmpl string, c *object.Commit, labels []string, f *logFormat) 
 						break
 					}
 				}
+			}
+		case tmpl[i] == 'g' && i+1 < len(tmpl) && f != nil && f.logEntry != nil && strings.IndexByte("dDsne", tmpl[i+1]) >= 0:
+			i++
+			switch tmpl[i] {
+			case 'd', 'D':
+				b.WriteString(f.selector)
+			case 's':
+				b.WriteString(f.logEntry.msg)
+			case 'n':
+				name, _, _ := strings.Cut(f.logEntry.who, " <")
+				b.WriteString(name)
+			case 'e':
+				_, email, _ := strings.Cut(f.logEntry.who, " <")
+				b.WriteString(strings.TrimSuffix(email, ">"))
 			}
 		case tmpl[i] == 'd' && len(labels) > 0:
 			b.WriteString(" (" + strings.Join(labels, ", ") + ")")

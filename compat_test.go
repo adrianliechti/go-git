@@ -839,6 +839,66 @@ git status -s
 git restore --source main -- b
 git status -s
 `},
+	{"reflog", `
+git init -q -b main
+echo a > a
+git add a
+git commit -q -m one
+echo b >> a
+git commit -qam two
+git commit -q --amend -m "two amended"
+git checkout -q -b feature
+echo f > f
+git add f
+git commit -qm feat
+git checkout -q main
+git merge -q feature
+git reset -q --hard HEAD~1
+git checkout -q HEAD~1
+git checkout -q main
+git branch topic
+git branch -m topic renamed
+git switch -q feature
+git switch -q -
+git cherry-pick feature
+git revert --no-edit HEAD
+git reflog
+git reflog show main
+git reflog show feature
+git reflog renamed
+cat .git/logs/HEAD
+git rev-parse HEAD@{2} main@{1} @{1} @{-1}
+git rev-parse HEAD@{99}
+git log -g --oneline -3
+git log -g -1
+git log -g --format="%h %gd %gs" -2
+git checkout -q -
+git branch --show-current
+git checkout -
+git reflog exists main
+git reflog exists nope
+git branch -D renamed
+git reflog renamed
+`},
+	{"remote reflogs", `
+git init -q -b main src
+cd src && echo a > a && git add a && git commit -qm one
+git clone -q src dst
+cd dst && git reflog
+cd dst && git reflog show origin/HEAD
+cd src && echo b >> a && git commit -qam two && git checkout -qb side && git commit -q --allow-empty -m s && git checkout -q main
+cd dst && git fetch -q
+cd dst && git reflog show origin/main
+cd dst && git reflog show origin/side
+cd src && git commit -q --allow-empty -m three
+cd dst && git pull -q
+cd dst && git reflog -2
+cd dst && git commit -q --allow-empty -m mine && git push -q origin main:pushed
+cd dst && git reflog show origin/pushed
+cd src && git commit -q --amend --allow-empty -m three2
+cd dst && git fetch
+cd dst && git reflog show origin/main -1
+`},
 }
 
 func TestCompatibility(t *testing.T) {

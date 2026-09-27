@@ -253,7 +253,8 @@ func (r *repo) fetch(ep endpoint, specs []config.RefSpec, opts fetchOptions, fir
 			line.code, line.summary, line.suffix = '!', "[rejected]", "  (non-fast-forward)"
 		}
 		if line.code != '!' {
-			if err := r.Storer.SetReference(plumbing.NewHashReference(m.dst, m.hash)); err != nil {
+			how := map[byte]string{'*': "storing head", ' ': "fast-forward", '+': "forced-update"}[line.code]
+			if err := r.fetchUpdate(m.dst, m.hash, how); err != nil {
 				return nil, err
 			}
 		}
@@ -296,6 +297,15 @@ func (r *repo) fetch(ep endpoint, specs []config.RefSpec, opts fetchOptions, fir
 		}
 	}
 	return res, nil
+}
+
+// fetchUpdate stores a fetched ref, logging it as "<action>: <how>". Clone
+// clears the action, as git does not log its remote-tracking refs.
+func (r *repo) fetchUpdate(name plumbing.ReferenceName, h plumbing.Hash, how string) error {
+	if r.g.reflogAction == "" || name.IsTag() {
+		return r.Storer.SetReference(plumbing.NewHashReference(name, h))
+	}
+	return r.updateRef(name, h, r.g.reflogAction+": "+how)
 }
 
 // reverseRefSpec maps a destination ref back to its source for a wildcard
@@ -584,6 +594,8 @@ func (g *gitRun) clone(args []string) error {
 	if err := g.writeConfig(r.localConfig(), cfg); err != nil {
 		return err
 	}
+	cloneMsg := "clone: from " + url
+	g.reflogAction = ""
 	if _, err := r.fetch(ep, []config.RefSpec{config.RefSpec(spec)}, fetchOptions{tags: true}, ""); err != nil {
 		return err
 	}
@@ -594,11 +606,12 @@ func (g *gitRun) clone(args []string) error {
 	}
 	if !bare && head != "" {
 		if tip, ok := adv.refs[head]; ok {
-			if err := r.Storer.SetReference(plumbing.NewSymbolicReference(
-				plumbing.ReferenceName("refs/remotes/"+origin+"/HEAD"),
+			originHead := plumbing.ReferenceName("refs/remotes/" + origin + "/HEAD")
+			if err := r.Storer.SetReference(plumbing.NewSymbolicReference(originHead,
 				plumbing.ReferenceName("refs/remotes/"+origin+"/"+head.Short()))); err != nil {
 				return err
 			}
+			r.appendReflog(originHead, plumbing.ZeroHash, tip, cloneMsg)
 			// Check out while HEAD is still unborn, then create the branch.
 			if !noCheckout {
 				c, err := r.CommitObject(tip)
@@ -609,7 +622,7 @@ func (g *gitRun) clone(args []string) error {
 					return err
 				}
 			}
-			if err := r.Storer.SetReference(plumbing.NewHashReference(head, tip)); err != nil {
+			if err := r.updateRef(head, tip, cloneMsg); err != nil {
 				return err
 			}
 		}
@@ -876,9 +889,9 @@ func (g *gitRun) push(args []string) error {
 		}
 		if tracking := r.trackingRef(remoteName, u.name); tracking != "" {
 			if u.new.IsZero() {
-				r.Storer.RemoveReference(tracking)
+				r.deleteRef(tracking)
 			} else {
-				r.Storer.SetReference(plumbing.NewHashReference(tracking, u.new))
+				r.updateRef(tracking, u.new, "update by push")
 			}
 		}
 	}
@@ -1072,9 +1085,9 @@ func (g *gitRun) pull(args []string) error {
 		if pullRebase == "true" {
 			return fatalf("pull --rebase is not supported by this git")
 		}
-		return r.threeWayMerge(target, "Merge branch '"+merge.Short()+"' of "+displayURL(ep.url), mergeOptions{label: shortRef(r.trackingRef(remoteName, merge)), quiet: quiet})
+		return r.threeWayMerge(target, "Merge branch '"+merge.Short()+"' of "+displayURL(ep.url), mergeOptions{label: shortRef(r.trackingRef(remoteName, merge)), quiet: quiet, action: g.reflogAction})
 	}
-	return r.fastForward(head, target, quiet)
+	return r.fastForward(head, target, quiet, g.reflogAction)
 }
 
 func mustConfig(r *repo) *format.Config {
@@ -1086,7 +1099,7 @@ func mustConfig(r *repo) *format.Config {
 }
 
 // fastForward moves HEAD's branch to target like git merge's fast-forward.
-func (r *repo) fastForward(head, target *object.Commit, quiet bool) error {
+func (r *repo) fastForward(head, target *object.Commit, quiet bool, action string) error {
 	g := r.g
 	if head != nil && r.isAncestor(target.Hash, head.Hash) {
 		fmt.Fprintln(g.out, "Already up to date.")
@@ -1095,7 +1108,7 @@ func (r *repo) fastForward(head, target *object.Commit, quiet bool) error {
 	if err := r.switchTo(target, "merge", false); err != nil {
 		return err
 	}
-	if err := r.setHead(target.Hash); err != nil {
+	if err := r.setHead(target.Hash, action+": Fast-forward"); err != nil {
 		return err
 	}
 	if quiet || head == nil {
@@ -1273,7 +1286,7 @@ func (r *repo) removeRefsWithPrefix(prefix string) {
 		return nil
 	})
 	for _, n := range names {
-		r.Storer.RemoveReference(n)
+		r.deleteRef(n)
 	}
 }
 
@@ -1299,7 +1312,11 @@ func (r *repo) renameRefsWithPrefix(old, new string) {
 		} else {
 			moved = plumbing.NewHashReference(rename(ref.Name()), ref.Hash())
 		}
+		entries := r.readReflog(ref.Name())
 		r.Storer.SetReference(moved)
-		r.Storer.RemoveReference(ref.Name())
+		r.deleteRef(ref.Name())
+		if len(entries) > 0 {
+			r.writeReflog(moved.Name(), entries)
+		}
 	}
 }

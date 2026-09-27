@@ -223,7 +223,7 @@ func (g *gitRun) branch(args []string) error {
 						"hint: Disable this message with \"git config set advice.forceDeleteBranch false\"\n", name, name)
 				}
 			}
-			if err := r.Storer.RemoveReference(ref.Name()); err != nil {
+			if err := r.deleteRef(ref.Name()); err != nil {
 				return err
 			}
 			cfg, err := r.readLocalConfig()
@@ -238,11 +238,14 @@ func (g *gitRun) branch(args []string) error {
 		if len(names) > 2 {
 			return usagef("usage: git branch <name> [<start-point>]")
 		}
-		start := "HEAD"
+		start, from := "HEAD", current
 		if len(names) == 2 {
-			start = names[1]
+			start, from = names[1], names[1]
 		}
-		if err := r.createBranch(names[0], start); err != nil {
+		if from == "" {
+			from = "HEAD"
+		}
+		if err := r.createBranch(names[0], start, from); err != nil {
 			return err
 		}
 		// Branching from a remote-tracking branch sets it as upstream.
@@ -291,11 +294,18 @@ func (r *repo) renameBranch(old, name string) error {
 	if _, err := r.Storer.Reference(to); err == nil && old != name {
 		return fatalf("a branch named '%s' already exists", name)
 	}
-	if err := r.Storer.SetReference(plumbing.NewHashReference(to, ref.Hash())); err != nil {
-		return err
-	}
 	if old != name {
+		// The reflog moves with the branch, plus a rename entry.
+		entries := r.readReflog(from)
+		if err := r.Storer.SetReference(plumbing.NewHashReference(to, ref.Hash())); err != nil {
+			return err
+		}
 		r.Storer.RemoveReference(from)
+		r.deleteReflog(from)
+		if len(entries) > 0 {
+			r.writeReflog(to, entries)
+		}
+		r.appendReflog(to, ref.Hash(), ref.Hash(), "Branch: renamed "+from.String()+" to "+to.String())
 	}
 	if current, _ := r.branchName(); current == old {
 		if err := r.Storer.SetReference(plumbing.NewSymbolicReference(plumbing.HEAD, to)); err != nil {

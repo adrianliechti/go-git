@@ -515,7 +515,16 @@ func (g *gitRun) commit(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := r.setHead(h); err != nil {
+	action := "commit"
+	switch {
+	case amend:
+		action = "commit (amend)"
+	case len(parents) == 0:
+		action = "commit (initial)"
+	case len(parents) > 1:
+		action = "commit (merge)"
+	}
+	if err := r.setHead(h, action+": "+subject(msg)); err != nil {
 		return err
 	}
 	r.clearOperationState()
@@ -832,7 +841,9 @@ func mustAncestor(a, b *object.Commit) bool {
 	return err == nil && ok
 }
 
-func (r *repo) createBranch(name, start string) error {
+// createBranch creates a branch at start; from names the start point in
+// the reflog ("HEAD" for checkout -b, the current branch for git branch).
+func (r *repo) createBranch(name, start string, from ...string) error {
 	ref := plumbing.NewBranchReferenceName(name)
 	if err := ref.Validate(); err != nil || strings.HasPrefix(name, "-") {
 		return fatalf("'%s' is not a valid branch name", name)
@@ -847,7 +858,11 @@ func (r *repo) createBranch(name, start string) error {
 		}
 		return fatalf("not a valid object name: '%s'", start)
 	}
-	return r.Storer.SetReference(plumbing.NewHashReference(ref, c.Hash))
+	msg := "branch: Created from " + start
+	if len(from) > 0 {
+		msg = "branch: Created from " + from[0]
+	}
+	return r.updateRef(ref, c.Hash, msg)
 }
 
 // switchBranch implements both git switch and branch-mode git checkout.
@@ -890,14 +905,15 @@ func (r *repo) switchBranch(name string, create bool, start string, detach bool,
 	}
 	if err := r.switchTo(target, "checkout", false); err != nil {
 		if create {
-			r.Storer.RemoveReference(ref)
+			r.deleteRef(ref)
 		}
 		return err
 	}
+	msg := "checkout: moving from " + r.headName() + " to " + name
 	if isBranch {
-		err = r.Storer.SetReference(plumbing.NewSymbolicReference(plumbing.HEAD, ref))
+		err = r.pointHead(ref, plumbing.ZeroHash, msg)
 	} else {
-		err = r.Storer.SetReference(plumbing.NewHashReference(plumbing.HEAD, target.Hash))
+		err = r.pointHead("", target.Hash, msg)
 	}
 	if err != nil || quiet {
 		return err
@@ -973,6 +989,7 @@ func (r *repo) checkoutTracking(name, remote string, quiet bool) error {
 }
 
 func (g *gitRun) checkout(args []string) error {
+	args = splitFlags(args, "qf", "bB")
 	var create, quiet, detach, force bool
 	var newBranch string
 	var rest, paths []string
@@ -991,7 +1008,7 @@ func (g *gitRun) checkout(args []string) error {
 			detach = true
 		case a == "-f" || a == "--force":
 			force = true
-		case strings.HasPrefix(a, "-"):
+		case strings.HasPrefix(a, "-") && a != "-":
 			return usagef("error: unknown option `%s'", strings.TrimLeft(a, "-"))
 		default:
 			rest = append(rest, a)
@@ -1024,6 +1041,13 @@ func (g *gitRun) checkout(args []string) error {
 		rest = []string{"HEAD"}
 	}
 	name := rest[0]
+	if name == "-" {
+		prev, ok := r.previousBranch(1)
+		if !ok {
+			return fatalf("invalid reference: @{-1}")
+		}
+		name = prev
+	}
 	if !detach && !r.isBranch(name) {
 		if remote := r.dwimRemote(name); remote != "" {
 			return r.checkoutTracking(name, remote, quiet)
@@ -1090,6 +1114,7 @@ func (r *repo) checkoutPaths(source string, paths []string) error {
 }
 
 func (g *gitRun) switchBranch(args []string) error {
+	args = splitFlags(args, "qdcC", "")
 	var create, quiet, detach bool
 	var rest []string
 	for _, a := range args {
@@ -1101,7 +1126,7 @@ func (g *gitRun) switchBranch(args []string) error {
 		case "-d", "--detach":
 			detach = true
 		default:
-			if strings.HasPrefix(a, "-") {
+			if strings.HasPrefix(a, "-") && a != "-" {
 				return usagef("error: unknown option `%s'", strings.TrimLeft(a, "-"))
 			}
 			rest = append(rest, a)
@@ -1120,6 +1145,13 @@ func (g *gitRun) switchBranch(args []string) error {
 			start = rest[1]
 		}
 		return r.switchBranch(rest[0], true, start, false, quiet)
+	}
+	if rest[0] == "-" {
+		prev, ok := r.previousBranch(1)
+		if !ok {
+			return fatalf("invalid reference: @{-1}")
+		}
+		rest[0] = prev
 	}
 	if !detach && !r.isBranch(rest[0]) {
 		if remote := r.dwimRemote(rest[0]); remote != "" {
@@ -1303,7 +1335,7 @@ func (g *gitRun) reset(args []string) error {
 			return err
 		}
 		if target != nil {
-			if err := r.setHead(target.Hash); err != nil {
+			if err := r.setHead(target.Hash, "reset: moving to "+rev); err != nil {
 				return err
 			}
 		}
