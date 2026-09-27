@@ -1,0 +1,76 @@
+# go-git CLI
+
+A subset of the `git` command line, implemented in Go on top of
+[go-git](https://github.com/go-git/go-git). It runs entirely in-process against
+a pluggable filesystem: no host `git`, no child processes, no network.
+
+It was built for [go-bash](https://github.com/adrianliechti/go-bash), where it
+is registered as a virtual `git` command, but it works with any writable
+filesystem.
+
+```go
+code, err := git.Run(ctx, git.Options{
+    Args:   []string{"log", "--oneline"},
+    Dir:    "/work",           // working directory inside FS
+    Env:    env,               // GIT_AUTHOR_*, GIT_COMMITTER_*, HOME, ...
+    Stdout: os.Stdout,
+    Stderr: os.Stderr,
+    FS:     fsys,              // git.FS: fs.FS plus OpenFile/Mkdir/Remove/Rename
+})
+```
+
+## Sandbox
+
+`Run` never touches the host: every read and write goes through `Options.FS`,
+and environment variables come only from `Options.Env`. The global config is
+`$GIT_CONFIG_GLOBAL` or `$HOME/.gitconfig` resolved inside the `FS`; system
+config, the host's home directory, the network, and child processes (editor,
+pager, hooks) are never used. go-git's `Plain*` functions and config-scope
+loaders read host files, so this package only calls APIs with explicit storage
+and always passes author, committer, and tagger signatures. `sandbox_test.go`
+checks this with an in-memory `FS` and a decoy host config.
+
+`git.OpenDir(path)` is the one opt-in exception: it provides an `FS` for a host
+directory, confined with `os.Root`. `cmd/git` uses it rooted at `/`.
+
+## Command-line tool
+
+`cmd/git` runs the same code against the host filesystem, so it can stand in
+for `git` in scripts that stay within the supported subset:
+
+```sh
+go build -o bin/git ./cmd/git
+PATH=$PWD/bin:$PATH git init -q demo && cd demo && git status
+```
+
+## Compatibility
+
+`compat_test.go` runs each scenario twice with `/bin/sh`: once with the real
+`git` and once with `cmd/git` first on `PATH`. Each command is echoed with its
+merged stdout/stderr and exit status, and the two transcripts must be
+identical, including commit and tree hashes. The scenarios cover commits,
+status (long, short, porcelain), diffs and stats, branches, fast-forward
+merges, reset/restore, rm, tags, subdirectories, log formats, ignore rules,
+config, amend, and error messages. They were written against git 2.54.
+
+```sh
+go test ./...
+```
+
+Supported commands: `init`, `add`, `rm`, `commit`, `status`, `log`, `show`,
+`diff`, `branch`, `checkout`, `switch`, `restore`, `reset`, `merge`, `tag`,
+`config`, `rev-parse`, `cat-file`, `ls-files`, `hash-object`, `version`.
+Only the common options of each are implemented.
+
+Known differences from git:
+
+- No network or remotes: `clone`, `fetch`, `pull`, `push`, `remote` are absent.
+- No `stash`, `rebase`, `cherry-pick`, `revert`, `mv`, `clean`, `blame`, `grep`.
+- `merge` only fast-forwards; `commit --amend` keeps only the first parent.
+- No editor, pager, hooks, or colors; `-m`/`-F` are required for messages.
+- No rename detection: renames show as a delete and an add.
+- Diffs use Myers with git's slide-down compaction but without the indent
+  heuristic, so hunk placement can differ for indented code.
+- No symlinks, no ref decorations (`%d` is empty), short hashes are always 7
+  characters, and paths with special characters are not quoted.
+- `-c name=value` is accepted and ignored.
