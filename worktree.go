@@ -27,7 +27,7 @@ func (r *repo) ignoreMatcher() (gitignore.Matcher, error) {
 	if err != nil {
 		return nil, err
 	}
-	if data, err := fs.ReadFile(r.g.fsys, fsName(path.Join(r.gitDir, "info/exclude"))); err == nil {
+	if data, err := fs.ReadFile(r.g.fsys, fsName(path.Join(r.commonDir, "info/exclude"))); err == nil {
 		for _, line := range strings.Split(string(data), "\n") {
 			if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "#") {
 				patterns = append(patterns, gitignore.ParsePattern(line, nil))

@@ -2,6 +2,7 @@ package git
 
 import (
 	"fmt"
+	"path"
 	"sort"
 	"strings"
 
@@ -206,6 +207,9 @@ func (g *gitRun) branch(args []string) error {
 			if name == current {
 				return failf(1, "error: cannot delete branch '%s' used by worktree at '%s'\n", name, r.top)
 			}
+			if p, used := r.branchUsedElsewhere(ref.Name()); used {
+				return failf(1, "error: cannot delete branch '%s' used by worktree at '%s'\n", name, p)
+			}
 			if !forceDel {
 				// Like git, a branch merged into its upstream counts as merged.
 				base := plumbing.ZeroHash
@@ -377,10 +381,19 @@ func (r *repo) listBranches(current string, local, remote bool, verbose int) err
 			width = max(width, len(it.label))
 		}
 	}
+	elsewhere := map[string]bool{}
+	for _, w := range r.worktrees() {
+		if w.branch != "" && path.Clean(w.path) != path.Clean(r.top) {
+			elsewhere[w.branch.Short()] = true
+		}
+	}
 	for _, it := range items {
 		mark := "  "
-		if it.current {
+		switch {
+		case it.current:
 			mark = "* "
+		case it.branch != "" && elsewhere[it.branch]:
+			mark = "+ " // checked out in another worktree
 		}
 		switch {
 		case it.target != "":

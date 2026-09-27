@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -1274,12 +1275,15 @@ func (g *gitRun) revParse(args []string) error {
 		switch {
 		case a == "--show-toplevel":
 			fmt.Fprintln(g.out, r.top)
-		case a == "--git-dir":
-			if g.cwd == r.top {
-				fmt.Fprintln(g.out, ".git")
-			} else {
-				fmt.Fprintln(g.out, strings.TrimSuffix(r.top, "/")+"/.git")
+		case a == "--git-dir" || a == "--git-common-dir" || a == "--absolute-git-dir":
+			dir := r.gitDir
+			if a == "--git-common-dir" {
+				dir = r.commonDir
 			}
+			if a != "--absolute-git-dir" && g.cwd == r.top && dir == path.Join(r.top, ".git") {
+				dir = ".git"
+			}
+			fmt.Fprintln(g.out, dir)
 		case a == "--show-prefix":
 			fmt.Fprintln(g.out, r.prefix)
 		case a == "--show-cdup":

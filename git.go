@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-git/go-billy/v5"
 	gogit "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/cache"
@@ -23,6 +24,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/format/index"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/storage/filesystem"
+	"github.com/go-git/go-git/v5/storage/filesystem/dotgit"
 )
 
 // File is a writable file. Seek, ReadAt, and Truncate are optional; files
@@ -279,6 +281,7 @@ var commands = map[string]func(*gitRun, []string) error{
 	"format-patch":  (*gitRun).formatPatch,
 	"apply":         (*gitRun).apply,
 	"am":            (*gitRun).am,
+	"worktree":      (*gitRun).worktree,
 	"version":       (*gitRun).version,
 	"mv":            (*gitRun).mv,
 	"clean":         (*gitRun).clean,
@@ -295,7 +298,7 @@ var commands = map[string]func(*gitRun, []string) error{
 // Commands that real git has but this implementation deliberately omits.
 var unsupported = []string{
 	"gc", "notes",
-	"submodule", "worktree",
+	"submodule",
 }
 
 func (g *gitRun) main(args []string) int {
@@ -429,8 +432,11 @@ type repo struct {
 	g      *gitRun
 	wt     *billyFS // nil for a bare repository
 	top    string   // absolute path of the worktree root, or of a bare repository
-	gitDir string   // absolute path of the git directory
-	prefix string   // cwd relative to top, "" or ending in "/"
+	gitDir string   // absolute path of the git directory (per worktree)
+	// commonDir holds what linked worktrees share: objects, refs, config.
+	// It equals gitDir outside linked worktrees.
+	commonDir string
+	prefix    string // cwd relative to top, "" or ending in "/"
 	// quietCheckout switches branches without a reflog entry, as rebase
 	// does when given a branch to rebase.
 	quietCheckout bool
@@ -450,8 +456,11 @@ func (g *gitRun) openRepo() (*repo, error) {
 // openAny opens the repository containing cwd, which may be bare.
 func (g *gitRun) openAny() (*repo, error) {
 	for dir := g.cwd; ; dir = path.Dir(dir) {
-		if info, err := fs.Stat(g.fsys, fsName(path.Join(dir, ".git"))); err == nil && info.IsDir() {
-			return g.openAt(dir)
+		if info, err := fs.Stat(g.fsys, fsName(path.Join(dir, ".git"))); err == nil {
+			if info.IsDir() {
+				return g.openAt(dir)
+			}
+			return g.openLinked(dir)
 		}
 		if g.isGitDir(dir) {
 			return g.openBare(dir)
@@ -477,7 +486,10 @@ func (g *gitRun) isGitDir(dir string) bool {
 // dir itself, dir/.git, or dir.git.
 func (g *gitRun) openPath(dir string) (*repo, error) {
 	for _, d := range []string{dir, dir + ".git"} {
-		if info, err := fs.Stat(g.fsys, fsName(path.Join(d, ".git"))); err == nil && info.IsDir() {
+		if info, err := fs.Stat(g.fsys, fsName(path.Join(d, ".git"))); err == nil {
+			if !info.IsDir() {
+				return g.openLinked(d)
+			}
 			return g.openAt(d)
 		}
 		if g.isGitDir(d) {
@@ -506,7 +518,57 @@ func (g *gitRun) openAt(top string) (*repo, error) {
 	} else if top == "/" && g.cwd != "/" {
 		prefix = strings.TrimPrefix(g.cwd, "/") + "/"
 	}
-	return &repo{Repository: r, g: g, wt: wt, top: top, gitDir: path.Join(top, ".git"), prefix: prefix}, nil
+	gitDir := path.Join(top, ".git")
+	return &repo{Repository: r, g: g, wt: wt, top: top, gitDir: gitDir, commonDir: gitDir, prefix: prefix}, nil
+}
+
+// readGitLink reads a ".git" file ("gitdir: <path>") of a linked worktree
+// or submodule; relative paths are relative to top.
+func (g *gitRun) readGitLink(top string) (string, error) {
+	data, err := fs.ReadFile(g.fsys, fsName(path.Join(top, ".git")))
+	if err != nil {
+		return "", err
+	}
+	target, ok := strings.CutPrefix(strings.TrimSpace(string(data)), "gitdir: ")
+	if !ok {
+		return "", fatalf("invalid gitfile format: %s", path.Join(top, ".git"))
+	}
+	if !path.IsAbs(target) {
+		target = path.Join(top, target)
+	}
+	return path.Clean(target), nil
+}
+
+// openLinked opens a worktree whose .git is a file pointing at its git
+// directory: a submodule or a linked worktree (which has a commondir).
+func (g *gitRun) openLinked(top string) (*repo, error) {
+	gitDir, err := g.readGitLink(top)
+	if err != nil {
+		return nil, err
+	}
+	commonDir := gitDir
+	if data, err := fs.ReadFile(g.fsys, fsName(path.Join(gitDir, "commondir"))); err == nil {
+		c := strings.TrimSpace(string(data))
+		if !path.IsAbs(c) {
+			c = path.Join(gitDir, c)
+		}
+		commonDir = path.Clean(c)
+	}
+	wt := newBillyFS(g.fsys, fsName(top))
+	var dot billy.Filesystem = newBillyFS(g.fsys, fsName(gitDir))
+	if commonDir != gitDir {
+		dot = dotgit.NewRepositoryFilesystem(dot, newBillyFS(g.fsys, fsName(commonDir)))
+	}
+	st := filesystem.NewStorage(dot, cache.NewObjectLRUDefault())
+	r, err := gogit.Open(st, wt)
+	if err != nil {
+		return nil, fatalf("not a git repository: %s", gitDir)
+	}
+	prefix := ""
+	if strings.HasPrefix(g.cwd, top+"/") {
+		prefix = strings.TrimPrefix(g.cwd, top+"/") + "/"
+	}
+	return &repo{Repository: r, g: g, wt: wt, top: top, gitDir: gitDir, commonDir: commonDir, prefix: prefix}, nil
 }
 
 func (g *gitRun) openBare(dir string) (*repo, error) {
@@ -515,7 +577,7 @@ func (g *gitRun) openBare(dir string) (*repo, error) {
 	if err != nil {
 		return nil, fatalf("not a git repository: %s: %v", dir, err)
 	}
-	return &repo{Repository: r, g: g, top: dir, gitDir: dir}, nil
+	return &repo{Repository: r, g: g, top: dir, gitDir: dir, commonDir: dir}, nil
 }
 
 // repoPath converts a user path to a repository path ("" for the top).
@@ -1011,7 +1073,7 @@ func (g *gitRun) writeConfig(name string, cfg *format.Config) error {
 	return f.Close()
 }
 
-func (r *repo) localConfig() string { return fsName(path.Join(r.gitDir, "config")) }
+func (r *repo) localConfig() string { return fsName(path.Join(r.commonDir, "config")) }
 
 // configValue returns the effective value of key, with local overriding global.
 func (r *repo) configValue(key string) string {

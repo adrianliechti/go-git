@@ -1248,7 +1248,7 @@ func (g *gitRun) countObjects(args []string) error {
 	if err != nil {
 		return err
 	}
-	d := newBillyFS(g.fsys, fsName(path.Join(r.gitDir, "objects")))
+	d := newBillyFS(g.fsys, fsName(path.Join(r.commonDir, "objects")))
 	count, blocks := 0, int64(0)
 	dirs, _ := d.ReadDir(".")
 	for _, dir := range dirs {

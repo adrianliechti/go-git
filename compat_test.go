@@ -1252,6 +1252,49 @@ printf 'a\nb\n' > g
 cat g.diff | sed 's/^+1$/+one/' > g2.diff
 git apply g2.diff
 `},
+	{"worktrees", `
+git init -q -b main repo
+cd repo && echo a > a && git add a && git commit -qm one && git branch feature
+cd repo && git worktree add ../wt-feature feature
+cd repo && git worktree add -b hotfix ../wt-hotfix
+cd repo && git worktree add --detach ../wt-detached HEAD
+cd repo && git worktree add ../wt-new
+cd repo && git worktree list
+cd repo && git worktree list --porcelain
+cat wt-feature/.git
+ls repo/.git/worktrees
+cat repo/.git/worktrees/wt-feature/commondir repo/.git/worktrees/wt-feature/gitdir repo/.git/worktrees/wt-feature/HEAD
+cd repo && git branch
+cd repo && git checkout feature
+cd repo && git branch -d hotfix
+cd wt-feature && git status
+cd wt-feature && echo f > f && git add f && git commit -qm "feature work"
+cd wt-feature && git log --oneline --all
+cd wt-feature && git rev-parse --git-dir --git-common-dir --show-toplevel
+cd wt-feature && git reflog
+cd wt-feature && git branch
+cd repo && git worktree list
+cd repo && git log --oneline feature
+cd repo && git worktree remove ../wt-new
+echo x > wt-hotfix/x
+cd repo && git worktree remove ../wt-hotfix
+cd repo && git worktree remove --force ../wt-hotfix
+rm -rf wt-detached
+cd repo && git worktree list
+cd repo && git worktree prune
+cd repo && git worktree list
+cd repo && git worktree move ../wt-feature ../wt-moved
+cd repo && git worktree list
+cd repo && git worktree lock ../wt-moved
+cd repo && git worktree list
+cd repo && git worktree remove ../wt-moved
+cd repo && git worktree unlock ../wt-moved
+cd repo && git worktree add ../wt-feature2 feature
+cd repo && git worktree add ../wt-main main
+cd wt-moved && git switch main
+cd repo && git rev-parse --git-dir --git-common-dir
+ls
+`},
 }
 
 func TestCompatibility(t *testing.T) {

@@ -917,6 +917,11 @@ func (r *repo) switchBranch(name string, create bool, start string, detach bool,
 			return failf(1, "error: pathspec '%s' did not match any file(s) known to git\n", name)
 		}
 	}
+	if isBranch && !(name == current && !create) {
+		if p, used := r.branchUsedElsewhere(ref); used {
+			return fatalf("'%s' is already used by worktree at '%s'", name, p)
+		}
+	}
 	if isBranch && name == current && !create {
 		r.appendReflog(plumbing.HEAD, target.Hash, target.Hash, "checkout: moving from "+name+" to "+name)
 		if !quiet {

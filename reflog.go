@@ -23,8 +23,13 @@ type reflogEntry struct {
 	msg      string
 }
 
+// reflogPath is per worktree for HEAD and shared for other refs.
 func (r *repo) reflogPath(name plumbing.ReferenceName) string {
-	return fsName(path.Join(r.gitDir, "logs", name.String()))
+	dir := r.commonDir
+	if name == plumbing.HEAD {
+		dir = r.gitDir
+	}
+	return fsName(path.Join(dir, "logs", name.String()))
 }
 
 // logsRef reports whether updates to name are logged, following git's
