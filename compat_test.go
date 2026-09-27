@@ -354,6 +354,132 @@ git ls-files -s
 git cat-file -p HEAD^{tree}
 git cat-file -p HEAD:a
 `},
+	{"path quoting", `
+git init -q -b main
+mkdir d
+echo a > d/a
+echo sp > "with space"
+echo u > "\303\274mlaut"
+printf 't\n' > "tab	x"
+echo q > 'q"uote'
+git status -s
+git status
+git add .
+git status -s
+git status --porcelain
+git ls-files
+git commit -q -m init
+git show --stat --format=%s
+git show --name-only --format=%s
+echo more >> 'q"uote'
+git diff
+git diff --numstat
+`},
+	{"decorations", `
+git init -q -b main
+echo a > a
+git add a
+git commit -q -m one
+echo b > b
+git add b
+git commit -q -m two
+git log --oneline --decorate
+git tag v1
+git tag -a v2 -m annotated HEAD~1
+git branch other
+git branch zeta HEAD~1
+git log --oneline --decorate
+git log --decorate -1
+git log --format="%h%d|%D"
+git checkout -q --detach
+git log --oneline --decorate
+git checkout -q main
+git log --oneline
+`},
+	{"mv", `
+git init -q -b main
+mkdir d e
+echo a > d/a
+echo b > b
+echo c > c
+echo t > e/t
+git add .
+git commit -q -m init
+git mv b b2
+git mv nope x
+git mv b2 c
+git mv -f b2 c
+git mv d/a e
+git mv e/a missing/dir/a
+git mv -n c e
+git mv -v c e
+echo u > untracked
+git mv untracked x
+git mv -k untracked c2 e
+git ls-files
+git commit -q -m moved
+git show --stat --format=%s
+`},
+	{"clean", `
+git init -q -b main
+mkdir tracked
+echo t > tracked/t
+echo "*.log" > .gitignore
+git add .
+git commit -q -m init
+echo x > untracked
+echo y > tracked/new
+mkdir -p ud/sub
+echo z > ud/sub/f
+echo l > app.log
+mkdir logs
+echo l > logs/a.log
+git clean
+git clean -n
+git clean -nd
+git clean -ndx
+git clean -nX
+git clean -ndX
+git clean -n tracked
+git clean -f
+git status -s
+git clean -fdq
+git status -s --ignored
+git clean -fdx
+ls
+`},
+	{"renames", `
+git init -q -b main
+seq 1 40 > numbers
+printf 'alpha\nbeta\ngamma\n' > greek
+mkdir -p src/lib
+echo code > src/lib/code.go
+touch empty
+cp numbers numbers.copy
+git add .
+git commit -q -m init
+git mv numbers counted
+git mv src/lib src/pkg
+git mv greek letters
+echo delta >> letters
+git mv empty void
+git status
+git status -s
+git diff --cached --stat
+git diff --cached --name-status
+git diff --cached --numstat
+git diff --cached
+git diff --cached --no-renames --stat
+git commit -m renamed
+git show --stat --format=%s
+git log --oneline --name-status -1
+sed 's/^1[0-9]$/x/' counted > tmp
+mv tmp counted
+git rm -q numbers.copy
+git add counted
+git diff --cached --stat
+git diff --cached -M --name-status
+`},
 }
 
 func TestCompatibility(t *testing.T) {

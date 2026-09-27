@@ -45,15 +45,28 @@ func (r *repo) treeSide(c *object.Commit) (side, error) {
 	if c == nil {
 		return s, nil
 	}
-	tree, err := c.Tree()
+	return s, r.walkTree(s, c.TreeHash, "")
+}
+
+// walkTree adds the files of a tree to s. It walks entries directly because
+// go-git's file iterator rejects names that git accepts, such as tabs.
+func (r *repo) walkTree(s side, h plumbing.Hash, prefix string) error {
+	tree, err := r.TreeObject(h)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	err = tree.Files().ForEach(func(f *object.File) error {
-		s[f.Name] = entry{hash: f.Hash, mode: f.Mode, data: r.blobData(f.Hash)}
-		return nil
-	})
-	return s, err
+	for _, e := range tree.Entries {
+		switch e.Mode {
+		case filemode.Dir:
+			if err := r.walkTree(s, e.Hash, prefix+e.Name+"/"); err != nil {
+				return err
+			}
+		case filemode.Submodule:
+		default:
+			s[prefix+e.Name] = entry{hash: e.Hash, mode: e.Mode, data: r.blobData(e.Hash)}
+		}
+	}
+	return nil
 }
 
 func (r *repo) indexSide(idx *index.Index) side {
@@ -104,6 +117,24 @@ func (r *repo) worktreeEntry(p string) (entry, bool, error) {
 type change struct {
 	path     string
 	from, to *entry // nil for an added or deleted file
+	oldPath  string // source path of a rename, else ""
+	score    int    // rename similarity, see rename.go
+}
+
+// fromPath is the path on the old side.
+func (c change) fromPath() string {
+	if c.oldPath != "" {
+		return c.oldPath
+	}
+	return c.path
+}
+
+// displayName is the stat and numstat name: "old => new" for renames.
+func (c change) displayName() string {
+	if c.oldPath != "" {
+		return renameName(c.oldPath, c.path)
+	}
+	return q(c.path)
 }
 
 // changes compares two sides, keeping paths selected by specs.
@@ -302,16 +333,22 @@ func compact(lines []string, changed []bool) {
 func mode6(m filemode.FileMode) string { return fmt.Sprintf("%06o", uint32(m)) }
 
 func (d *fileDiff) writePatch(w io.Writer) {
-	p := d.path
-	fmt.Fprintf(w, "diff --git a/%s b/%s\n", p, p)
+	p, op := d.path, d.fromPath()
+	fmt.Fprintf(w, "diff --git %s %s\n", q("a/"+op), q("b/"+p))
 	from, to := d.from, d.to
+	if d.oldPath != "" {
+		if from.mode != to.mode {
+			fmt.Fprintf(w, "old mode %s\nnew mode %s\n", mode6(from.mode), mode6(to.mode))
+		}
+		fmt.Fprintf(w, "similarity index %d%%\nrename from %s\nrename to %s\n", similarityIndex(d.score), q(op), q(p))
+	}
 	switch {
 	case from == nil:
 		fmt.Fprintf(w, "new file mode %s\nindex 0000000..%s\n", mode6(to.mode), short(to.hash))
 	case to == nil:
 		fmt.Fprintf(w, "deleted file mode %s\nindex %s..0000000\n", mode6(from.mode), short(from.hash))
 	default:
-		if from.mode != to.mode {
+		if from.mode != to.mode && d.oldPath == "" {
 			fmt.Fprintf(w, "old mode %s\nnew mode %s\n", mode6(from.mode), mode6(to.mode))
 		}
 		if from.hash != to.hash {
@@ -322,7 +359,7 @@ func (d *fileDiff) writePatch(w io.Writer) {
 			fmt.Fprintln(w)
 		}
 	}
-	oldName, newName := "a/"+p, "b/"+p
+	oldName, newName := q("a/"+op), q("b/"+p)
 	if from == nil {
 		oldName = "/dev/null"
 	}
@@ -427,7 +464,7 @@ func writeStat(w io.Writer, diffs []*fileDiff) {
 	}
 	maxName, maxChange, hasBinary := 0, 0, false
 	for _, d := range diffs {
-		maxName = max(maxName, len(d.path))
+		maxName = max(maxName, len(d.displayName()))
 		if d.binary {
 			hasBinary = true
 		} else {
@@ -457,7 +494,7 @@ func writeStat(w io.Writer, diffs []*fileDiff) {
 		return 1 + n*(graphWidth-1)/maxChange
 	}
 	for _, d := range diffs {
-		name := d.path
+		name := d.displayName()
 		if len(name) > nameWidth {
 			name = "..." + name[len(name)-nameWidth+3:]
 		}
@@ -508,16 +545,29 @@ func writeModeSummary(w io.Writer, diffs []*fileDiff) {
 	for _, d := range diffs {
 		switch {
 		case d.from == nil:
-			fmt.Fprintf(w, " create mode %s %s\n", mode6(d.to.mode), d.path)
+			fmt.Fprintf(w, " create mode %s %s\n", mode6(d.to.mode), q(d.path))
 		case d.to == nil:
-			fmt.Fprintf(w, " delete mode %s %s\n", mode6(d.from.mode), d.path)
+			fmt.Fprintf(w, " delete mode %s %s\n", mode6(d.from.mode), q(d.path))
+		case d.oldPath != "":
+			fmt.Fprintf(w, " rename %s (%d%%)\n", renameName(d.oldPath, d.path), similarityIndex(d.score))
+			if d.from.mode != d.to.mode {
+				fmt.Fprintf(w, " mode change %s => %s\n", mode6(d.from.mode), mode6(d.to.mode))
+			}
 		case d.from.mode != d.to.mode:
-			fmt.Fprintf(w, " mode change %s => %s %s\n", mode6(d.from.mode), mode6(d.to.mode), d.path)
+			fmt.Fprintf(w, " mode change %s => %s %s\n", mode6(d.from.mode), mode6(d.to.mode), q(d.path))
 		}
 	}
 }
 
-func computeDiffs(cs []change) ([]*fileDiff, error) {
+// computeDiffs computes content diffs, detecting renames like git's default
+// diff.renames=true unless noRenames is set.
+func computeDiffs(cs []change, noRenames bool) ([]*fileDiff, error) {
+	if !noRenames {
+		var err error
+		if cs, err = detectRenames(cs); err != nil {
+			return nil, err
+		}
+	}
 	out := make([]*fileDiff, 0, len(cs))
 	for _, c := range cs {
 		d, err := computeDiff(c)
@@ -547,5 +597,5 @@ func (r *repo) commitDiffs(c *object.Commit, specs []string) ([]*fileDiff, error
 	if err != nil {
 		return nil, err
 	}
-	return computeDiffs(changes(a, b, specs))
+	return computeDiffs(changes(a, b, specs), false)
 }

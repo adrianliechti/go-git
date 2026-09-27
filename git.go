@@ -131,20 +131,25 @@ var commands = map[string]func(*gitRun, []string) error{
 	"ls-files":    (*gitRun).lsFiles,
 	"hash-object": (*gitRun).hashObject,
 	"version":     (*gitRun).version,
+	"mv":          (*gitRun).mv,
+	"clean":       (*gitRun).clean,
 }
 
 // Commands that real git has but this implementation deliberately omits.
 var unsupported = []string{
-	"am", "apply", "bisect", "blame", "cherry-pick", "clean", "clone", "fetch",
-	"gc", "grep", "mv", "notes", "pull", "push", "rebase", "reflog", "remote",
+	"am", "apply", "bisect", "blame", "cherry-pick", "clone", "fetch",
+	"gc", "grep", "notes", "pull", "push", "rebase", "reflog", "remote",
 	"revert", "stash", "submodule", "worktree",
 }
 
 func (g *gitRun) main(args []string) int {
 	for len(args) > 0 && strings.HasPrefix(args[0], "-") {
 		switch a := args[0]; {
-		case a == "--version":
+		case a == "--version" || a == "-v":
 			args = []string{"version"}
+			continue
+		case a == "-h" || a == "--help":
+			args = append([]string{"help"}, args[1:]...)
 			continue
 		case a == "-C" && len(args) > 1:
 			g.cwd = g.abs(args[1])
@@ -159,11 +164,23 @@ func (g *gitRun) main(args []string) int {
 		}
 	}
 	if len(args) == 0 {
-		fmt.Fprintln(g.err, "usage: git [-C <path>] <command> [<args>]")
+		g.writeMainHelp()
 		return 1
 	}
 	name := args[0]
 	run, ok := commands[name]
+	if name == "help" {
+		run, ok = (*gitRun).help, true
+	}
+	if ok && name != "help" && len(args) > 1 {
+		switch args[1] {
+		case "-h":
+			fmt.Fprint(g.out, commandUsage(name))
+			return 129
+		case "--help":
+			run, args = (*gitRun).help, []string{"help", name}
+		}
+	}
 	if !ok {
 		for _, u := range unsupported {
 			if u == name {

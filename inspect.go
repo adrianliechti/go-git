@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -25,7 +26,9 @@ type logFormat struct {
 	nameOnly  bool
 	nameStat  bool
 	noPatch   bool
-	count     int // -1 for unlimited
+	decorate  bool
+	deco      map[plumbing.Hash][]string // loaded lazily
+	count     int                        // -1 for unlimited
 	reverse   bool
 	revs      []string
 	paths     []string
@@ -67,7 +70,11 @@ func parseLogArgs(args []string) (*logFormat, error) {
 			f.noPatch = true
 		case a == "--reverse":
 			f.reverse = true
-		case a == "--no-decorate" || a == "--decorate" || a == "--no-color" || a == "--first-parent":
+		case a == "--decorate" || a == "--decorate=short" || a == "--decorate=full":
+			f.decorate = true
+		case a == "--no-decorate":
+			f.decorate = false
+		case a == "--no-color" || a == "--first-parent":
 		case a == "-n" && i+1 < len(args):
 			i++
 			n, err := strconv.Atoi(args[i])
@@ -200,7 +207,7 @@ func (r *repo) writeCommit(w io.Writer, c *object.Commit, f *logFormat, specs []
 		if n > 0 {
 			fmt.Fprintln(w)
 		}
-		fmt.Fprintf(w, "commit %s\n", c.Hash)
+		fmt.Fprintf(w, "commit %s%s\n", c.Hash, r.decoration(f, c.Hash, f.decorate))
 		if len(c.ParentHashes) > 1 {
 			fmt.Fprint(w, "Merge:")
 			for _, p := range c.ParentHashes {
@@ -217,14 +224,14 @@ func (r *repo) writeCommit(w io.Writer, c *object.Commit, f *logFormat, specs []
 		if f.kind == "oneline" {
 			h = short(c.Hash)
 		}
-		fmt.Fprintf(w, "%s %s\n", h, subject(c.Message))
+		fmt.Fprintf(w, "%s%s %s\n", h, r.decoration(f, c.Hash, f.decorate), subject(c.Message))
 	case "format":
 		if n > 0 {
 			fmt.Fprintln(w)
 		}
-		fmt.Fprint(w, expandFormat(f.template, c))
+		fmt.Fprint(w, expandFormat(f.template, c, r.labels(f, c.Hash)))
 	case "tformat":
-		fmt.Fprintf(w, "%s\n", expandFormat(f.template, c))
+		fmt.Fprintf(w, "%s\n", expandFormat(f.template, c, r.labels(f, c.Hash)))
 	}
 	if f.noPatch || !(f.patch || f.stat || f.nameOnly || f.nameStat) {
 		return nil
@@ -245,13 +252,17 @@ func writeDiffs(w io.Writer, diffs []*fileDiff, stat, patch, nameOnly, nameStat,
 	for _, d := range diffs {
 		switch {
 		case numstat && d.binary:
-			fmt.Fprintf(w, "-\t-\t%s\n", d.path)
+			fmt.Fprintf(w, "-\t-\t%s\n", d.displayName())
 		case numstat:
-			fmt.Fprintf(w, "%d\t%d\t%s\n", d.added, d.deleted, d.path)
+			fmt.Fprintf(w, "%d\t%d\t%s\n", d.added, d.deleted, d.displayName())
 		case nameStat:
-			fmt.Fprintf(w, "%c\t%s\n", changeCode(d.change), d.path)
+			if d.oldPath != "" {
+				fmt.Fprintf(w, "R%03d\t%s\t%s\n", similarityIndex(d.score), q(d.oldPath), q(d.path))
+			} else {
+				fmt.Fprintf(w, "%c\t%s\n", changeCode(d.change), q(d.path))
+			}
 		case nameOnly:
-			fmt.Fprintln(w, d.path)
+			fmt.Fprintln(w, q(d.path))
 		}
 	}
 	if stat {
@@ -267,7 +278,92 @@ func writeDiffs(w io.Writer, diffs []*fileDiff, stat, patch, nameOnly, nameStat,
 	}
 }
 
-func expandFormat(tmpl string, c *object.Commit) string {
+// labels returns the decorations of h, loading all refs on first use.
+func (r *repo) labels(f *logFormat, h plumbing.Hash) []string {
+	if f.deco == nil {
+		f.deco = r.decorations()
+	}
+	return f.deco[h]
+}
+
+// decoration formats " (labels)" when enabled and h has any.
+func (r *repo) decoration(f *logFormat, h plumbing.Hash, enabled bool) string {
+	if !enabled {
+		return ""
+	}
+	if l := r.labels(f, h); len(l) > 0 {
+		return " (" + strings.Join(l, ", ") + ")"
+	}
+	return ""
+}
+
+// decorations maps commits to ref labels in git's order: HEAD (with its
+// branch) first, then the other refs in reverse refname order.
+func (r *repo) decorations() map[plumbing.Hash][]string {
+	out := map[plumbing.Hash][]string{}
+	iter, err := r.Storer.IterReferences()
+	if err != nil {
+		return out
+	}
+	var names []plumbing.ReferenceName
+	iter.ForEach(func(ref *plumbing.Reference) error {
+		if ref.Name() != plumbing.HEAD {
+			names = append(names, ref.Name())
+		}
+		return nil
+	})
+	sort.Slice(names, func(i, j int) bool { return names[i] > names[j] })
+	headBranch := plumbing.ReferenceName("")
+	if head, err := r.Storer.Reference(plumbing.HEAD); err == nil && head.Type() == plumbing.SymbolicReference {
+		headBranch = head.Target()
+	}
+	for _, name := range names {
+		if name == headBranch {
+			continue
+		}
+		h, ok := r.peel(name)
+		if !ok {
+			continue
+		}
+		label := name.String()
+		switch {
+		case name.IsBranch():
+			label = name.Short()
+		case name.IsTag():
+			label = "tag: " + name.Short()
+		case name.IsRemote():
+			label = strings.TrimPrefix(label, "refs/remotes/")
+		}
+		out[h] = append(out[h], label)
+	}
+	if ref, err := r.Head(); err == nil {
+		label := "HEAD"
+		if headBranch != "" {
+			label = "HEAD -> " + headBranch.Short()
+		}
+		out[ref.Hash()] = append([]string{label}, out[ref.Hash()]...)
+	}
+	return out
+}
+
+// peel resolves a ref to a commit, following symbolic refs and tags.
+func (r *repo) peel(name plumbing.ReferenceName) (plumbing.Hash, bool) {
+	ref, err := r.Reference(name, true)
+	if err != nil {
+		return plumbing.ZeroHash, false
+	}
+	h := ref.Hash()
+	for range 10 {
+		t, err := r.TagObject(h)
+		if err != nil {
+			break
+		}
+		h = t.Target
+	}
+	return h, true
+}
+
+func expandFormat(tmpl string, c *object.Commit, labels []string) string {
 	subj := subject(c.Message)
 	body := ""
 	if _, rest, ok := strings.Cut(strings.TrimLeft(c.Message, "\n"), "\n\n"); ok {
@@ -332,8 +428,11 @@ func expandFormat(tmpl string, c *object.Commit) string {
 			b.WriteByte('\n')
 		case tmpl[i] == '%':
 			b.WriteByte('%')
-		case tmpl[i] == 'd' || tmpl[i] == 'D':
-			// Decorations are not supported; git prints nothing without refs.
+		case tmpl[i] == 'd' && len(labels) > 0:
+			b.WriteString(" (" + strings.Join(labels, ", ") + ")")
+		case tmpl[i] == 'D':
+			b.WriteString(strings.Join(labels, ", "))
+		case tmpl[i] == 'd':
 		case two != "" && tmpl[i] == 'a' && sig(c.Author):
 			i++
 		case two != "" && tmpl[i] == 'c' && sig(c.Committer):
@@ -397,7 +496,7 @@ func (g *gitRun) show(args []string) error {
 }
 
 func (g *gitRun) diff(args []string) error {
-	var cached, stat, nameOnly, nameStat, numstat, quiet, exitCode bool
+	var cached, stat, nameOnly, nameStat, numstat, quiet, exitCode, noRenames bool
 	var revs, paths []string
 	for i := 0; i < len(args); i++ {
 		switch a := args[i]; a {
@@ -418,7 +517,9 @@ func (g *gitRun) diff(args []string) error {
 			quiet, exitCode = true, true
 		case "--exit-code":
 			exitCode = true
-		case "--no-color", "-p", "-u", "--patch":
+		case "--no-renames":
+			noRenames = true
+		case "--no-color", "-p", "-u", "--patch", "-M", "--find-renames":
 		default:
 			if strings.HasPrefix(a, "-") {
 				return usagef("error: invalid option: %s", a)
@@ -512,7 +613,7 @@ func (g *gitRun) diff(args []string) error {
 			return err
 		}
 	}
-	diffs, err := computeDiffs(changes(a, b, specs))
+	diffs, err := computeDiffs(changes(a, b, specs), noRenames)
 	if err != nil {
 		return err
 	}
@@ -781,9 +882,9 @@ func (g *gitRun) lsFiles(args []string) error {
 			continue
 		}
 		if stage {
-			fmt.Fprintf(g.out, "%s %s %d\t%s\n", mode6(e.Mode), e.Hash, e.Stage, r.display(e.Name))
+			fmt.Fprintf(g.out, "%s %s %d\t%s\n", mode6(e.Mode), e.Hash, e.Stage, q(r.display(e.Name)))
 		} else {
-			fmt.Fprintln(g.out, r.display(e.Name))
+			fmt.Fprintln(g.out, q(r.display(e.Name)))
 		}
 	}
 	return nil

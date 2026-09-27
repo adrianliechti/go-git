@@ -78,7 +78,8 @@ func dirOrDot(dir string) string {
 
 type fileStatus struct {
 	path             string
-	staged, unstaged byte // ' ', 'A', 'M', 'D'
+	staged, unstaged byte   // ' ', 'A', 'M', 'D', 'R'
+	oldPath          string // source of a staged rename
 }
 
 type repoStatus struct {
@@ -86,6 +87,7 @@ type repoStatus struct {
 	head      *object.Commit
 	tracked   []fileStatus
 	untracked []string // directories end in "/"
+	ignored   []string // only filled by addIgnored
 }
 
 func (s *repoStatus) hasStaged() bool {
@@ -141,8 +143,13 @@ func (r *repo) computeStatus(specs []string, collapse, withUntracked bool) (*rep
 		}
 		return byPath[p]
 	}
-	for _, c := range changes(headSide, indexSide, specs) {
-		get(c.path).staged = changeCode(c)
+	staged, err := detectRenames(changes(headSide, indexSide, specs))
+	if err != nil {
+		return nil, err
+	}
+	for _, c := range staged {
+		f := get(c.path)
+		f.staged, f.oldPath = changeCode(c), c.oldPath
 	}
 	for _, c := range changes(indexSide, work, specs) {
 		if c.from != nil { // worktree-only files are untracked, handled below
@@ -194,8 +201,62 @@ func (r *repo) computeStatus(specs []string, collapse, withUntracked bool) (*rep
 	return st, nil
 }
 
+// addIgnored lists ignored untracked files. With collapse, a directory that
+// holds only ignored untracked files is reported as "dir/".
+func (r *repo) addIgnored(st *repoStatus, specs []string, collapse bool) error {
+	idx, err := r.readIndex()
+	if err != nil {
+		return err
+	}
+	tracked := map[string]bool{}
+	keep := map[string]bool{} // directories with tracked or non-ignored files
+	for _, e := range idx.Entries {
+		tracked[e.Name] = true
+		for d := path.Dir(e.Name); d != "."; d = path.Dir(d) {
+			keep[d] = true
+		}
+	}
+	m, err := r.ignoreMatcher()
+	if err != nil {
+		return err
+	}
+	files, err := r.walkFiles("", m, true)
+	if err != nil {
+		return err
+	}
+	for _, f := range files {
+		if !tracked[f.path] && !f.ignored {
+			for d := path.Dir(f.path); d != "."; d = path.Dir(d) {
+				keep[d] = true
+			}
+		}
+	}
+	seen := map[string]bool{}
+	for _, f := range files {
+		if tracked[f.path] || !f.ignored || !matchAny(specs, f.path) {
+			continue
+		}
+		name := f.path
+		if collapse {
+			for d := path.Dir(f.path); d != "."; d = path.Dir(d) {
+				if !keep[d] {
+					name = d + "/"
+				}
+			}
+		}
+		if !seen[name] {
+			seen[name] = true
+			st.ignored = append(st.ignored, name)
+		}
+	}
+	sort.Strings(st.ignored)
+	return nil
+}
+
 func changeCode(c change) byte {
 	switch {
+	case c.oldPath != "":
+		return 'R'
 	case c.from == nil:
 		return 'A'
 	case c.to == nil:

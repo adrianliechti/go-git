@@ -403,10 +403,8 @@ func (g *gitRun) commit(args []string) error {
 		if head == nil {
 			return fatalf("You have nothing to amend.")
 		}
-		// go-git's amend keeps only the first parent.
-		parents, base = nil, nil
-		if len(head.ParentHashes) > 0 {
-			parents = head.ParentHashes[:1]
+		parents, base = head.ParentHashes, nil
+		if len(parents) > 0 {
 			if base, err = r.CommitObject(parents[0]); err != nil {
 				return err
 			}
@@ -452,19 +450,12 @@ func (g *gitRun) commit(args []string) error {
 	if err != nil {
 		return err
 	}
-	w, err := r.Worktree()
+	h, err := r.commitIndex(msg, author, committer, parents)
 	if err != nil {
 		return err
 	}
-	// Author and Committer must be set: go-git otherwise falls back to the
-	// host's global and system config, escaping the FS sandbox.
-	opts := &gogit.CommitOptions{Author: author, Committer: committer, AllowEmptyCommits: true, Amend: amend}
-	if !amend {
-		opts.Parents = parents
-	}
-	h, err := w.Commit(msg, opts)
-	if err != nil {
-		return fatalf("%v", err)
+	if err := r.setHead(h); err != nil {
+		return err
 	}
 	if quiet {
 		return nil
@@ -503,7 +494,7 @@ func (g *gitRun) commit(args []string) error {
 }
 
 func (g *gitRun) status(args []string) error {
-	short, porcelain, showBranch, untracked := false, false, false, "normal"
+	short, porcelain, showBranch, ignored, untracked := false, false, false, false, "normal"
 	var paths []string
 	for _, a := range args {
 		switch {
@@ -517,6 +508,8 @@ func (g *gitRun) status(args []string) error {
 			short, showBranch = true, true
 		case a == "--long":
 			short, porcelain = false, false
+		case a == "--ignored" || a == "--ignored=traditional":
+			ignored = true
 		case a == "-uall" || a == "--untracked-files=all":
 			untracked = "all"
 		case a == "-uno" || a == "--untracked-files=no":
@@ -540,6 +533,11 @@ func (g *gitRun) status(args []string) error {
 	if err != nil {
 		return err
 	}
+	if ignored {
+		if err := r.addIgnored(st, specs, untracked != "all"); err != nil {
+			return err
+		}
+	}
 	if !short && !porcelain {
 		r.writeLongStatus(g.out, st, false)
 		return nil
@@ -559,12 +557,27 @@ func (g *gitRun) status(args []string) error {
 		}
 	}
 	for _, f := range st.tracked {
-		fmt.Fprintf(g.out, "%c%c %s\n", f.staged, f.unstaged, name(f.path))
+		p := qs(name(f.path))
+		if f.oldPath != "" {
+			p = qs(name(f.oldPath)) + " -> " + p
+		}
+		fmt.Fprintf(g.out, "%c%c %s\n", f.staged, f.unstaged, p)
 	}
 	for _, p := range st.untracked {
-		fmt.Fprintf(g.out, "?? %s\n", name(p))
+		fmt.Fprintf(g.out, "?? %s\n", qs(name(p)))
+	}
+	for _, p := range st.ignored {
+		fmt.Fprintf(g.out, "!! %s\n", qs(name(p)))
 	}
 	return nil
+}
+
+// statusName is a long-status path, "old -> new" for renames.
+func (r *repo) statusName(f fileStatus) string {
+	if f.oldPath != "" {
+		return q(r.display(f.oldPath)) + " -> " + q(r.display(f.path))
+	}
+	return q(r.display(f.path))
 }
 
 func ident(s object.Signature) string { return s.Name + " <" + s.Email + ">" }
@@ -584,7 +597,7 @@ func (r *repo) writeLongStatus(w io.Writer, st *repoStatus, forCommit bool) {
 			fmt.Fprint(w, "\nNo commits yet\n\n")
 		}
 	}
-	labels := map[byte]string{'A': "new file:", 'M': "modified:", 'D': "deleted:"}
+	labels := map[byte]string{'A': "new file:", 'M': "modified:", 'D': "deleted:", 'R': "renamed:"}
 	if st.hasStaged() {
 		fmt.Fprintln(w, "Changes to be committed:")
 		if st.head == nil {
@@ -594,7 +607,7 @@ func (r *repo) writeLongStatus(w io.Writer, st *repoStatus, forCommit bool) {
 		}
 		for _, f := range st.tracked {
 			if f.staged != ' ' {
-				fmt.Fprintf(w, "\t%-12s%s\n", labels[f.staged], r.display(f.path))
+				fmt.Fprintf(w, "\t%-12s%s\n", labels[f.staged], r.statusName(f))
 			}
 		}
 		fmt.Fprintln(w)
@@ -611,7 +624,7 @@ func (r *repo) writeLongStatus(w io.Writer, st *repoStatus, forCommit bool) {
 		fmt.Fprintln(w, `  (use "git restore <file>..." to discard changes in working directory)`)
 		for _, f := range st.tracked {
 			if f.unstaged != ' ' {
-				fmt.Fprintf(w, "\t%-12s%s\n", labels[f.unstaged], r.display(f.path))
+				fmt.Fprintf(w, "\t%-12s%s\n", labels[f.unstaged], q(r.display(f.path)))
 			}
 		}
 		fmt.Fprintln(w)
@@ -620,7 +633,15 @@ func (r *repo) writeLongStatus(w io.Writer, st *repoStatus, forCommit bool) {
 		fmt.Fprintln(w, "Untracked files:")
 		fmt.Fprintln(w, `  (use "git add <file>..." to include in what will be committed)`)
 		for _, p := range st.untracked {
-			fmt.Fprintf(w, "\t%s\n", r.display(p))
+			fmt.Fprintf(w, "\t%s\n", q(r.display(p)))
+		}
+		fmt.Fprintln(w)
+	}
+	if len(st.ignored) > 0 {
+		fmt.Fprintln(w, "Ignored files:")
+		fmt.Fprintln(w, `  (use "git add -f <file>..." to include in what will be committed)`)
+		for _, p := range st.ignored {
+			fmt.Fprintf(w, "\t%s\n", q(r.display(p)))
 		}
 		fmt.Fprintln(w)
 	}
@@ -890,7 +911,10 @@ func (g *gitRun) checkout(args []string) error {
 		return r.switchBranch(newBranch, true, start, false, quiet)
 	}
 	if len(rest) == 0 {
-		return nil
+		if !detach {
+			return nil
+		}
+		rest = []string{"HEAD"}
 	}
 	name := rest[0]
 	if _, err := r.Storer.Reference(plumbing.NewBranchReferenceName(name)); err != nil && !detach {
@@ -1208,7 +1232,7 @@ func (g *gitRun) merge(args []string) error {
 	if err != nil {
 		return err
 	}
-	diffs, err := computeDiffs(changes(a, b, nil))
+	diffs, err := computeDiffs(changes(a, b, nil), false)
 	if err != nil {
 		return err
 	}
@@ -1285,7 +1309,7 @@ func (g *gitRun) tag(args []string) error {
 	if err != nil {
 		return err
 	}
-	var opts *gogit.CreateTagOptions
+	target := c.Hash
 	if annotate {
 		if message == "" {
 			return fatalf("no tag message given; use -m (no editor is available)")
@@ -1294,11 +1318,19 @@ func (g *gitRun) tag(args []string) error {
 		if err != nil {
 			return err
 		}
-		// Tagger must be set; see the sandbox note in commit.
-		opts = &gogit.CreateTagOptions{Tagger: tagger, Message: cleanupMessage(message)}
+		target, err = r.storeObject(&object.Tag{
+			Name: rest[0], Tagger: *tagger, Message: cleanupMessage(message),
+			TargetType: plumbing.CommitObject, Target: c.Hash,
+		})
+		if err != nil {
+			return err
+		}
 	}
-	_, err = r.CreateTag(rest[0], c.Hash, opts)
-	return err
+	ref := plumbing.NewTagReferenceName(rest[0])
+	if err := ref.Validate(); err != nil {
+		return fatalf("'%s' is not a valid tag name.", rest[0])
+	}
+	return r.Storer.SetReference(plumbing.NewHashReference(ref, target))
 }
 
 func matchGlob(patterns []string, name string) bool {
