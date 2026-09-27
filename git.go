@@ -275,6 +275,7 @@ var commands = map[string]func(*gitRun, []string) error{
 	"shortlog":      (*gitRun).shortlog,
 	"grep":          (*gitRun).grep,
 	"blame":         (*gitRun).blame,
+	"bisect":        (*gitRun).bisect,
 	"version":       (*gitRun).version,
 	"mv":            (*gitRun).mv,
 	"clean":         (*gitRun).clean,
@@ -290,7 +291,7 @@ var commands = map[string]func(*gitRun, []string) error{
 
 // Commands that real git has but this implementation deliberately omits.
 var unsupported = []string{
-	"am", "apply", "bisect", "gc", "notes",
+	"am", "apply", "gc", "notes",
 	"submodule", "worktree",
 }
 

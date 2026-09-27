@@ -73,7 +73,7 @@ go test ./...
 Supported commands: `init`, `clone`, `add`, `mv`, `rm`, `restore`, `clean`,
 `stash`, `commit`, `status`, `log`, `show`, `diff`, `grep`, `blame`,
 `shortlog`, `describe`, `branch`, `checkout`, `switch`, `reset`, `merge`,
-`rebase`, `cherry-pick`, `revert`, `tag`, `remote`, `fetch`, `pull`, `push`,
+`rebase`, `cherry-pick`, `revert`, `bisect`, `tag`, `remote`, `fetch`, `pull`, `push`,
 `ls-remote`, `reflog`, `config`, `help`, `version`, and the plumbing commands
 `rev-parse`, `rev-list`, `cat-file`, `hash-object`, `ls-files`, `ls-tree`,
 `show-ref`, `for-each-ref`, `update-ref`, `symbolic-ref`, `write-tree`,

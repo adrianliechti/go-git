@@ -1171,6 +1171,38 @@ git merge-file -p ours.txt base.txt theirs.txt
 git merge-file -L mine -L base -L yours ours.txt base.txt theirs.txt
 cat ours.txt
 `},
+	{"bisect", `
+git init -q -b main
+for i in 1 2 3 4 5 6 7 8 9 10; do echo $i > f; git add f; git commit -qm "c$i"; done
+git bisect good
+git bisect start
+git bisect bad
+git bisect good HEAD~9
+git bisect bad
+git bisect good
+git bisect good
+git bisect log
+git bisect reset
+git status -sb
+git bisect start HEAD HEAD~9
+git bisect skip
+git bisect good
+git bisect good
+git bisect reset HEAD~2
+git log --oneline -1
+git bisect reset
+git bisect start --term-old=fast --term-new=slow
+git bisect slow
+git bisect fast HEAD~5
+git bisect terms
+git bisect reset
+git checkout -q main
+git bisect start
+git bisect good HEAD~4
+git bisect good HEAD~2
+git bisect bad
+git bisect reset
+`},
 }
 
 func TestCompatibility(t *testing.T) {

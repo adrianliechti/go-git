@@ -17,7 +17,7 @@ var helpGroups = []struct {
 }{
 	{"start a working area", []string{"clone", "init"}},
 	{"work on the current change", []string{"add", "mv", "restore", "rm", "stash"}},
-	{"examine the history and state", []string{"diff", "grep", "log", "show", "status"}},
+	{"examine the history and state", []string{"bisect", "diff", "grep", "log", "show", "status"}},
 	{"grow, mark and tweak your common history", []string{"branch", "cherry-pick", "commit", "merge", "rebase", "reset", "revert", "switch", "tag"}},
 	{"collaborate", []string{"fetch", "pull", "push"}},
 }
@@ -118,6 +118,10 @@ var help = map[string]commandHelp{
 	"shortlog":      {"Summarize 'git log' output", []string{"git shortlog [-s] [-n] [-e] [-c] [<revision-range>] [[--] <path>...]"}, nil},
 	"grep": {"Print lines matching a pattern",
 		[]string{"git grep [-n] [-i] [-c] [-l] [-L] [-w] [-v] [-h] [-q] [-E | -F] [--cached] [-e] <pattern> [<rev>...] [[--] <path>...]"}, nil},
+	"bisect": {"Use binary search to find the commit that introduced a bug",
+		[]string{"git bisect start [--term-(bad|new)=<term>] [--term-(good|old)=<term>] [<bad> [<good>...]]",
+			"git bisect (bad|new|<term-new>) [<rev>]", "git bisect (good|old|<term-old>) [<rev>...]",
+			"git bisect skip [<rev>...]", "git bisect reset [<commit>]", "git bisect (log|terms|visualize)"}, nil},
 	"blame": {"Show what revision and author last modified each line of a file",
 		[]string{"git blame [-s] [-e] [-l] [-t] [-L <start>,<end>] [<rev>] [--] <file>"}, nil},
 
