@@ -260,7 +260,8 @@ func (r *repo) squashFastForward(head, target *object.Commit) error {
 func (r *repo) squashMessage(head, target *object.Commit) string {
 	var b strings.Builder
 	b.WriteString("Squashed commit of the following:\n")
-	f := &logFormat{kind: "medium", count: -1, revs: []string{head.Hash.String() + ".." + target.Hash.String()}}
+	f := newLogFormat()
+	f.revs = []string{head.Hash.String() + ".." + target.Hash.String()}
 	commits, err := r.walk(f, nil)
 	if err != nil {
 		return b.String()

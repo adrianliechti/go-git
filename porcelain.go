@@ -13,6 +13,7 @@ import (
 	gogit "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/cache"
+	format "github.com/go-git/go-git/v5/plumbing/format/config"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/storage/filesystem"
 )
@@ -38,11 +39,7 @@ func (g *gitRun) init(args []string) error {
 	}
 	top := g.abs(dir)
 	if branch == "" {
-		cfg, err := g.readConfig(g.globalConfig())
-		if err != nil {
-			return err
-		}
-		branch, _ = configGet(cfg, "init.defaultBranch")
+		branch, _ = g.configLookup("init.defaultBranch", "")
 	}
 	if branch == "" {
 		branch = "master"
@@ -69,6 +66,17 @@ func (g *gitRun) init(args []string) error {
 		_, err := gogit.InitWithOptions(st, worktree, gogit.InitOptions{DefaultBranch: plumbing.NewBranchReferenceName(branch)})
 		if err != nil {
 			return fatalf("%v", err)
+		}
+		// Replace go-git's config with the one git init writes.
+		cfg := format.New()
+		cfg.SetOption("core", "", "repositoryformatversion", "0")
+		cfg.SetOption("core", "", "filemode", "true")
+		cfg.SetOption("core", "", "bare", fmt.Sprint(bare))
+		if !bare {
+			cfg.SetOption("core", "", "logallrefupdates", "true")
+		}
+		if err := g.writeConfig(fsName(path.Join(gitDir, "config")), cfg); err != nil {
+			return err
 		}
 	}
 	if !quiet {
@@ -1022,7 +1030,7 @@ func (g *gitRun) checkout(args []string) error {
 		}
 	}
 	if _, err := r.Storer.Reference(plumbing.NewBranchReferenceName(name)); err != nil && !detach {
-		if _, err := r.ResolveRevision(plumbing.Revision(name)); err != nil {
+		if _, err := r.resolveRev(name); err != nil {
 			return r.checkoutPaths("", rest) // not a revision: treat as paths
 		}
 	}
@@ -1136,6 +1144,9 @@ func (g *gitRun) restore(args []string) error {
 			worktree = true
 		case strings.HasPrefix(a, "--source="):
 			source = strings.TrimPrefix(a, "--source=")
+		case (a == "-s" || a == "--source") && i+1 < len(args):
+			source = args[i+1]
+			args[i+1] = "--source=" + source // consumed on the next iteration
 		case strings.HasPrefix(a, "-"):
 			return usagef("error: unknown option `%s'", strings.TrimLeft(a, "-"))
 		default:
@@ -1181,9 +1192,50 @@ func (g *gitRun) restore(args []string) error {
 			if src == "" {
 				src = "HEAD"
 			}
-			return r.checkoutPaths(src, paths)
+			return r.restoreWorktree(src, specs, paths)
 		}
 		return r.checkoutPaths("", paths)
+	}
+	return nil
+}
+
+// restoreWorktree makes worktree files match source without touching the
+// index; tracked files missing from source are deleted.
+func (r *repo) restoreWorktree(source string, specs, args []string) error {
+	c, err := r.resolveCommit(source)
+	if err != nil {
+		return err
+	}
+	from, err := r.treeSide(c)
+	if err != nil {
+		return err
+	}
+	idx, err := r.readIndex()
+	if err != nil {
+		return err
+	}
+	tracked := r.indexSide(idx)
+	for i, s := range specs {
+		found := false
+		for p, e := range from {
+			if matchPath(s, p) {
+				found = true
+				if _, err := r.writeFile(p, e); err != nil {
+					return err
+				}
+			}
+		}
+		for p := range tracked {
+			if _, inSource := from[p]; !inSource && matchPath(s, p) {
+				found = true
+				if err := r.removeFile(p); err != nil {
+					return err
+				}
+			}
+		}
+		if !found {
+			return failf(1, "error: pathspec '%s' did not match any file(s) known to git\n", args[i])
+		}
 	}
 	return nil
 }
@@ -1214,7 +1266,7 @@ func (g *gitRun) reset(args []string) error {
 	}
 	rev := "HEAD"
 	if len(rest) > 0 {
-		if _, err := r.ResolveRevision(plumbing.Revision(rest[0])); err == nil {
+		if _, err := r.resolveRev(rest[0]); err == nil {
 			rev, rest = rest[0], rest[1:]
 		}
 	}
@@ -1433,6 +1485,22 @@ func (g *gitRun) config(args []string) error {
 				}
 			}
 		}
+		if !global {
+			for _, kv := range g.overrides {
+				k, v, hasValue := strings.Cut(kv, "=")
+				if sec, sub, name, ok := splitKey(k); ok {
+					k = strings.ToLower(sec) + "." + strings.ToLower(name)
+					if sub != "" {
+						k = strings.ToLower(sec) + "." + sub + "." + strings.ToLower(name)
+					}
+				}
+				if hasValue {
+					fmt.Fprintf(g.out, "%s=%s\n", k, v)
+				} else {
+					fmt.Fprintln(g.out, k)
+				}
+			}
+		}
 		return nil
 	}
 	if len(rest) == 0 || len(rest) > 2 {
@@ -1452,6 +1520,9 @@ func (g *gitRun) config(args []string) error {
 			if v, ok := configGet(cfg, rest[0]); ok {
 				value, found = v, true
 			}
+		}
+		if v, ok := g.configOverride(rest[0]); ok && !global {
+			value, found = v, true
 		}
 		if !found {
 			return failf(1, "")

@@ -751,6 +751,94 @@ git log --graph --oneline -3
 git log --topo-order --oneline
 git log --graph --reverse
 `},
+	{"log options", `
+git init -q -b main
+echo a > a
+git add a
+git commit -q -m "first subject" -m "first body"
+echo b > b
+git add b
+GIT_AUTHOR_NAME=Bob GIT_AUTHOR_EMAIL=bob@example.com GIT_AUTHOR_DATE="@1700100000 +0000" git commit -q -m "add b (fixes #12)"
+echo aa >> a
+GIT_COMMITTER_DATE="@1700200000 +0200" git commit -qam "grow a"
+git mv b c
+git commit -q -m "rename b"
+echo cc >> c
+git commit -qam "grow c"
+for p in short full fuller raw reference email; do git log -1 --pretty=$p; done
+git log --format=short -1
+git log -1 --abbrev-commit
+git log -1 --oneline --abbrev=10
+for d in iso iso-strict rfc short raw unix format:%Y/%m/%d; do git log -1 --format=%ad --date=$d; done
+git log -2 --date=iso
+git log --format="%as|%cs|%aD|%at|%ae|%an|%al|%cn|%ce|%ci|%cI|%f|%x41|%%" -3
+git log --oneline --author=Bob
+git log --oneline --author=bob
+git log --oneline -i --author=bob
+git log --oneline --grep=fixes
+git log --oneline --grep=a --grep=b
+git log --oneline --grep=a --grep=b --all-match
+git log --oneline --grep=grow --invert-grep
+git log --oneline --since=@1700150000
+git log --oneline --until=@1700150000
+git log --oneline --skip=2
+git log --oneline --skip=1 -2
+git log --oneline -S aa
+git log --oneline -G "^c"
+git log --oneline --no-merges
+git log --oneline --merges
+git log --oneline c
+git log --oneline --follow c
+git log --oneline --follow --stat c
+git log --oneline nope
+git log --shortstat --oneline -2
+git log --numstat --oneline -2
+git log --summary --oneline
+git log --oneline HEAD~3..
+git log --oneline ^HEAD~2 HEAD
+git log --oneline HEAD --not HEAD~2
+git log --oneline --first-parent
+`},
+	{"revisions and aliases", `
+git init -q -b main
+echo a > a
+git add a
+git commit -q -m one
+git checkout -q -b side
+echo s > s
+git add s
+git commit -q -m "side work"
+git checkout -q main
+echo b > b
+git add b
+git commit -q -m two
+git log --oneline main...side
+git log --oneline --left-right main...side
+git log --format="%m %s" main...side
+git diff --stat main...side
+git rev-parse @
+git rev-parse @~1
+git rev-parse ":/side"
+git rev-parse "HEAD^{commit}"
+git show -s --format=%s ":/one"
+git rev-parse "main@{u}"
+git -c user.name=Override log -1 --format=%an
+git -c alias.lg="log --oneline" lg
+git config alias.st "status -s"
+git config alias.last "log -1 --format=%s"
+echo u > u
+git st
+git last
+git -c alias.nested=st nested
+git config alias.loop loop2
+git config alias.loop2 loop
+git loop
+git -c color.ui=never -c foo.bar config --list | grep -v "^core\."
+git restore -s HEAD~1 b
+git status -s
+git restore --source main -- b
+git status -s
+`},
 }
 
 func TestCompatibility(t *testing.T) {

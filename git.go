@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -72,6 +73,9 @@ func Run(ctx context.Context, opts Options) (int, error) {
 		cwd: path.Clean("/" + opts.Dir), out: opts.Stdout, err: opts.Stderr,
 		disableNetwork: opts.DisableNetwork, httpClient: opts.HTTPClient,
 	}
+	if g.fsys == nil {
+		g.fsys = emptyFS{}
+	}
 	if g.stdin == nil {
 		g.stdin = strings.NewReader("")
 	}
@@ -88,6 +92,26 @@ func Run(ctx context.Context, opts Options) (int, error) {
 	return code, ctx.Err()
 }
 
+// emptyFS stands in for a missing Options.FS: nothing exists and nothing
+// can be written.
+type emptyFS struct{}
+
+func (emptyFS) Open(name string) (fs.File, error) {
+	return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
+}
+func (emptyFS) OpenFile(name string, flag int, perm fs.FileMode) (File, error) {
+	return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrPermission}
+}
+func (emptyFS) Mkdir(name string, perm fs.FileMode) error {
+	return &fs.PathError{Op: "mkdir", Path: name, Err: fs.ErrPermission}
+}
+func (emptyFS) Remove(name string) error {
+	return &fs.PathError{Op: "remove", Path: name, Err: fs.ErrPermission}
+}
+func (emptyFS) Rename(oldName, newName string) error {
+	return &fs.PathError{Op: "rename", Path: oldName, Err: fs.ErrPermission}
+}
+
 type gitRun struct {
 	ctx      context.Context
 	fsys     FS
@@ -98,6 +122,94 @@ type gitRun struct {
 
 	disableNetwork bool
 	httpClient     *http.Client
+	overrides      []string // -c name=value, in order
+}
+
+// configOverride returns the last -c value for key.
+func (g *gitRun) configOverride(key string) (string, bool) {
+	value, found := "", false
+	for _, kv := range g.overrides {
+		k, v, hasValue := strings.Cut(kv, "=")
+		if !hasValue {
+			v = "true" // "-c name" alone means true
+		}
+		if sameKey(k, key) {
+			value, found = v, true
+		}
+	}
+	return value, found
+}
+
+// sameKey compares config keys; section and name ignore case.
+func sameKey(a, b string) bool {
+	sa, suba, na, ok1 := splitKey(a)
+	sb, subb, nb, ok2 := splitKey(b)
+	return ok1 && ok2 && strings.EqualFold(sa, sb) && suba == subb && strings.EqualFold(na, nb)
+}
+
+// configLookup returns key from the global config, local (if non-empty),
+// and -c overrides, later sources winning.
+func (g *gitRun) configLookup(key, local string) (string, bool) {
+	value, found := "", false
+	for _, file := range []string{g.globalConfig(), local} {
+		if file == "" {
+			continue
+		}
+		cfg, err := g.readConfig(file)
+		if err != nil {
+			continue
+		}
+		if v, ok := configGet(cfg, key); ok {
+			value, found = v, true
+		}
+	}
+	if v, ok := g.configOverride(key); ok {
+		value, found = v, true
+	}
+	return value, found
+}
+
+// alias returns alias.<name> from the configuration, if any.
+func (g *gitRun) alias(name string) (string, bool) {
+	local := ""
+	if r, err := g.openAny(); err == nil {
+		local = r.localConfig()
+	}
+	return g.configLookup("alias."+name, local)
+}
+
+// splitAlias splits an alias value into words, honoring quotes.
+func splitAlias(s string) []string {
+	var words []string
+	var cur strings.Builder
+	quote := byte(0)
+	inWord := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case quote != 0 && c == quote:
+			quote = 0
+		case quote == 0 && (c == '"' || c == '\''):
+			quote, inWord = c, true
+		case quote == 0 && (c == ' ' || c == '\t'):
+			if inWord {
+				words = append(words, cur.String())
+				cur.Reset()
+				inWord = false
+			}
+		case c == '\\' && i+1 < len(s) && quote != '\'':
+			i++
+			cur.WriteByte(s[i])
+			inWord = true
+		default:
+			cur.WriteByte(c)
+			inWord = true
+		}
+	}
+	if inWord {
+		words = append(words, cur.String())
+	}
+	return words
 }
 
 // exitError carries a git-style exit status and message through helpers.
@@ -173,7 +285,8 @@ func (g *gitRun) main(args []string) int {
 			g.cwd = g.abs(args[1])
 			args = args[2:]
 		case a == "-c" && len(args) > 1:
-			args = args[2:] // accepted for compatibility; no effect
+			g.overrides = append(g.overrides, args[1])
+			args = args[2:]
 		case a == "--no-pager" || a == "-P" || a == "--no-replace-objects":
 			args = args[1:]
 		default:
@@ -187,6 +300,41 @@ func (g *gitRun) main(args []string) int {
 	}
 	name := args[0]
 	run, ok := commands[name]
+	var chain []string
+	for !ok && name != "help" {
+		value, isAlias := g.alias(name)
+		if !isAlias {
+			break
+		}
+		if strings.HasPrefix(value, "!") {
+			fmt.Fprintf(g.err, "fatal: shell alias '%s' cannot run in this sandbox\n", name)
+			return 128
+		}
+		for _, seen := range chain {
+			if seen != name {
+				continue
+			}
+			fmt.Fprintf(g.err, "fatal: alias loop detected: expansion of '%s' does not terminate:\n", chain[0])
+			for i, c := range chain {
+				mark := ""
+				if c == name {
+					mark = " <=="
+				} else if i == len(chain)-1 {
+					mark = " ==>"
+				}
+				fmt.Fprintf(g.err, "  %s%s\n", c, mark)
+			}
+			return 128
+		}
+		chain = append(chain, name)
+		args = append(splitAlias(value), args[1:]...)
+		if len(args) == 0 {
+			fmt.Fprintf(g.err, "fatal: empty alias for %s\n", name)
+			return 128
+		}
+		name = args[0]
+		run, ok = commands[name]
+	}
 	if name == "help" {
 		run, ok = (*gitRun).help, true
 	}
@@ -435,21 +583,104 @@ func errAmbiguous(rev string) error {
 		"Use '--' to separate paths from revisions, like this:\n'git <command> [<revision>...] -- [<file>...]'", rev)
 }
 
-// resolveCommit resolves a revision such as HEAD~1, a branch, a tag, or a hash.
+// resolveCommit resolves a revision such as HEAD~1, a branch, a tag, a
+// hash, @{upstream}, or :/message.
 func (r *repo) resolveCommit(rev string) (*object.Commit, error) {
-	h, err := r.ResolveRevision(plumbing.Revision(rev))
+	h, err := r.resolveRev(rev)
 	if err != nil {
-		return nil, errAmbiguous(rev)
+		return nil, err
 	}
-	c, err := r.CommitObject(*h)
+	c, err := r.CommitObject(h)
 	if err != nil {
-		// ResolveRevision may return an annotated tag; peel it.
-		if t, terr := r.TagObject(*h); terr == nil {
+		// A revision may name an annotated tag; peel it.
+		if t, terr := r.TagObject(h); terr == nil {
 			return t.Commit()
 		}
 		return nil, fatalf("%s is not a commit", rev)
 	}
 	return c, nil
+}
+
+// resolveRev handles the revision syntax go-git lacks and delegates the
+// rest (names, hashes, ~n, ^n) to go-git.
+func (r *repo) resolveRev(rev string) (plumbing.Hash, error) {
+	orig := rev
+	rev = strings.TrimSuffix(strings.TrimSuffix(rev, "^{commit}"), "^{}")
+	if rev == "@" || strings.HasPrefix(rev, "@~") || strings.HasPrefix(rev, "@^") {
+		rev = "HEAD" + rev[1:]
+	}
+	if pattern, ok := strings.CutPrefix(rev, ":/"); ok {
+		return r.searchMessage(pattern, orig)
+	}
+	if base, suffix, ok := strings.Cut(rev, "@{"); ok {
+		spec, rest, _ := strings.Cut(suffix, "}")
+		switch strings.ToLower(spec) {
+		case "u", "upstream":
+			branch := base
+			if branch == "" || branch == "HEAD" {
+				branch, _ = r.branchName()
+			}
+			up := r.upstreamRef(branch)
+			if up == "" {
+				return plumbing.ZeroHash, fatalf("no upstream configured for branch '%s'", branch)
+			}
+			ref, err := r.Reference(up, true)
+			if err != nil {
+				return plumbing.ZeroHash, fatalf("upstream branch '%s' not stored as a remote-tracking branch", shortRef(up))
+			}
+			if rest == "" {
+				return ref.Hash(), nil
+			}
+			return r.resolveRev(ref.Hash().String() + rest)
+		default:
+			return r.resolveReflog(base, spec, rest, orig)
+		}
+	}
+	// git needs at least four hex digits for an abbreviated hash; go-git
+	// would match "c" against any hash starting with c.
+	if len(rev) < 4 && isHex(rev) {
+		for _, name := range []string{rev, "refs/" + rev, "refs/tags/" + rev, "refs/heads/" + rev, "refs/remotes/" + rev, "refs/remotes/" + rev + "/HEAD"} {
+			if ref, err := r.Reference(plumbing.ReferenceName(name), true); err == nil {
+				return ref.Hash(), nil
+			}
+		}
+		return plumbing.ZeroHash, errAmbiguous(orig)
+	}
+	h, err := r.ResolveRevision(plumbing.Revision(rev))
+	if err != nil {
+		return plumbing.ZeroHash, errAmbiguous(orig)
+	}
+	return *h, nil
+}
+
+func isHex(s string) bool {
+	for _, c := range s {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return s != ""
+}
+
+// searchMessage resolves :/pattern to the newest commit reachable from any
+// ref whose message matches.
+func (r *repo) searchMessage(pattern, orig string) (plumbing.Hash, error) {
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return plumbing.ZeroHash, errAmbiguous(orig)
+	}
+	f := newLogFormat()
+	f.all = true
+	commits, err := r.walk(f, nil)
+	if err != nil {
+		return plumbing.ZeroHash, err
+	}
+	for _, c := range commits {
+		if re.MatchString(c.Message) {
+			return c.Hash, nil
+		}
+	}
+	return plumbing.ZeroHash, errAmbiguous(orig)
 }
 
 func (r *repo) readIndex() (*index.Index, error) {
@@ -619,17 +850,8 @@ func (r *repo) localConfig() string { return fsName(path.Join(r.gitDir, "config"
 
 // configValue returns the effective value of key, with local overriding global.
 func (r *repo) configValue(key string) string {
-	var value string
-	for _, file := range []string{r.g.globalConfig(), r.localConfig()} {
-		cfg, err := r.g.readConfig(file)
-		if err != nil {
-			continue
-		}
-		if v, ok := configGet(cfg, key); ok {
-			value = v
-		}
-	}
-	return value
+	v, _ := r.g.configLookup(key, r.localConfig())
+	return v
 }
 
 func splitKey(key string) (section, subsection, name string, ok bool) {

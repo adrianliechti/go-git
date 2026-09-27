@@ -32,6 +32,16 @@ type logFormat struct {
 	topo      bool
 	graph     *logGraph
 	excluded  map[plumbing.Hash]bool
+	dateMode  string
+	abbrev    bool
+	abbrevLen int
+	shortstat bool
+	numstat   bool
+	summary   bool
+	leftRight bool
+	filter    logFilter
+	sides     map[plumbing.Hash]byte // '<' or '>' for --left-right
+	followed  map[plumbing.Hash][]*fileDiff
 	deco      map[plumbing.Hash][]string // loaded lazily
 	count     int                        // -1 for unlimited
 	reverse   bool
@@ -40,9 +50,13 @@ type logFormat struct {
 	remaining []string // unrecognized arguments, for the caller
 }
 
+func newLogFormat() *logFormat {
+	return &logFormat{kind: "medium", count: -1, filter: logFilter{minParents: -1, maxParents: -1}}
+}
+
 // parseLogArgs parses options shared by log and show.
 func parseLogArgs(args []string) (*logFormat, error) {
-	f := &logFormat{kind: "medium", count: -1}
+	f := newLogFormat()
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
@@ -51,18 +65,8 @@ func parseLogArgs(args []string) (*logFormat, error) {
 			i = len(args)
 		case a == "--oneline":
 			f.kind = "oneline"
-		case strings.HasPrefix(a, "--format=") || strings.HasPrefix(a, "--pretty="):
-			v := a[strings.Index(a, "=")+1:]
-			switch {
-			case v == "oneline":
-				f.kind = "full-oneline"
-			case v == "medium":
-				f.kind = v
-			case strings.HasPrefix(v, "format:"):
-				f.kind, f.template = "format", strings.TrimPrefix(v, "format:")
-			default:
-				f.kind, f.template = "tformat", strings.TrimPrefix(v, "tformat:")
-			}
+		case a == "--pretty":
+			f.kind = "medium"
 		case a == "-p" || a == "-u" || a == "--patch":
 			f.patch = true
 		case a == "--stat":
@@ -86,7 +90,7 @@ func parseLogArgs(args []string) (*logFormat, error) {
 			f.decorate = true
 		case a == "--no-decorate":
 			f.decorate = false
-		case a == "--no-color" || a == "--first-parent":
+		case a == "--no-color":
 		case a == "-n" && i+1 < len(args):
 			i++
 			n, err := strconv.Atoi(args[i])
@@ -104,7 +108,13 @@ func parseLogArgs(args []string) (*logFormat, error) {
 		case len(a) > 1 && a[0] == '-' && isDigits(a[1:]):
 			f.count, _ = strconv.Atoi(a[1:])
 		case strings.HasPrefix(a, "-"):
-			f.remaining = append(f.remaining, a)
+			ok, err := f.parseLogOption(args, &i)
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				f.remaining = append(f.remaining, a)
+			}
 		default:
 			f.revs = append(f.revs, a)
 		}
@@ -136,6 +146,14 @@ func (g *gitRun) log(args []string) error {
 	specs, err := r.pathspecs(f.paths)
 	if err != nil {
 		return err
+	}
+	if err := r.splitRevsAndPaths(f); err != nil {
+		return err
+	}
+	if len(f.paths) > 0 && len(specs) == 0 {
+		if specs, err = r.pathspecs(f.paths); err != nil {
+			return err
+		}
 	}
 	if f.graphMode && f.reverse {
 		return fatalf("options '--graph' and '--reverse' cannot be used together")
@@ -177,6 +195,74 @@ func (g *gitRun) log(args []string) error {
 	return nil
 }
 
+// splitRevsAndPaths moves arguments after the first non-revision into the
+// paths, as git does when "--" is omitted; such paths must exist.
+func (r *repo) splitRevsAndPaths(f *logFormat) error {
+	for i, a := range f.revs {
+		if a == "--not" || r.isRevision(a) {
+			continue
+		}
+		for _, p := range f.revs[i:] {
+			if !r.pathExists(p) {
+				return errAmbiguous(p)
+			}
+		}
+		f.paths = append(append([]string{}, f.revs[i:]...), f.paths...)
+		f.revs = f.revs[:i]
+		return nil
+	}
+	return nil
+}
+
+// isRevision reports whether a names commits: a revision or a range.
+func (r *repo) isRevision(a string) bool {
+	parts := []string{strings.TrimPrefix(a, "^")}
+	if x, y, ok := strings.Cut(a, "..."); ok {
+		parts = []string{defaultHead(x), defaultHead(y)}
+	} else if x, y, ok := strings.Cut(a, ".."); ok {
+		parts = []string{defaultHead(x), defaultHead(y)}
+	}
+	for _, p := range parts {
+		if _, err := r.resolveCommit(p); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+func (r *repo) pathExists(p string) bool {
+	if r.bare() {
+		return false
+	}
+	rp, err := r.repoPath(p)
+	if err != nil {
+		return false
+	}
+	_, err = r.wt.Stat(dirOrDot(rp))
+	return err == nil
+}
+
+// followDiffs returns c's changes to *p, following a rename of *p to its
+// old name for older commits, as git log --follow does.
+func (r *repo) followDiffs(c *object.Commit, p *string) ([]*fileDiff, error) {
+	if len(c.ParentHashes) > 1 {
+		return nil, nil
+	}
+	all, err := r.commitDiffs(c, nil)
+	if err != nil {
+		return nil, err
+	}
+	for _, d := range all {
+		if d.path == *p {
+			if d.oldPath != "" {
+				*p = d.oldPath
+			}
+			return []*fileDiff{d}, nil
+		}
+	}
+	return nil, nil
+}
+
 // walk selects commits like git's default revision walk: a queue ordered by
 // committer date, ties broken by insertion order, parents added as commits
 // are shown.
@@ -201,15 +287,47 @@ func (r *repo) walk(f *logFormat, specs []string) ([]*object.Commit, error) {
 		}
 		revs = []string{"HEAD"}
 	}
+	negate := false
 	for _, rev := range revs {
+		if rev == "--not" {
+			negate = !negate
+			continue
+		}
+		if a, b, sym := strings.Cut(rev, "..."); sym {
+			// Symmetric difference: reachable from either side, not both.
+			ca, err := r.resolveCommit(defaultHead(a))
+			if err != nil {
+				return nil, err
+			}
+			cb, err := r.resolveCommit(defaultHead(b))
+			if err != nil {
+				return nil, err
+			}
+			left, right := r.ancestors(ca.Hash), r.ancestors(cb.Hash)
+			f.sides = map[plumbing.Hash]byte{}
+			for h := range left {
+				if right[h] {
+					excluded[h] = true
+				} else {
+					f.sides[h] = '<'
+				}
+			}
+			for h := range right {
+				if !left[h] {
+					f.sides[h] = '>'
+				}
+			}
+			include = append(include, ca.Hash, cb.Hash)
+			continue
+		}
 		switch a, b, isRange := strings.Cut(rev, ".."); {
 		case isRange:
 			if err := exclude(defaultHead(a)); err != nil {
 				return nil, err
 			}
 			rev = defaultHead(b)
-		case strings.HasPrefix(rev, "^"):
-			if err := exclude(rev[1:]); err != nil {
+		case strings.HasPrefix(rev, "^") || negate:
+			if err := exclude(strings.TrimPrefix(rev, "^")); err != nil {
 				return nil, err
 			}
 			continue
@@ -269,6 +387,7 @@ func (r *repo) walk(f *logFormat, specs []string) ([]*object.Commit, error) {
 		}
 	}
 	var out []*object.Commit
+	skipped := 0
 	for len(queue) > 0 {
 		best := 0
 		for i, it := range queue {
@@ -282,19 +401,45 @@ func (r *repo) walk(f *logFormat, specs []string) ([]*object.Commit, error) {
 		if excluded[c.Hash] {
 			continue
 		}
-		for _, p := range c.ParentHashes {
+		parents := c.ParentHashes
+		if f.filter.firstParent && len(parents) > 1 {
+			parents = parents[:1]
+		}
+		for _, p := range parents {
 			if err := push(p); err != nil {
 				return nil, err
 			}
 		}
-		if len(specs) > 0 {
-			diffs, err := r.commitDiffs(c, specs)
+		// Without --since-as-filter, git stops at the first older commit.
+		if lf := f.filter; lf.since != nil && !lf.sinceAsFilter && c.Committer.When.Before(*lf.since) {
+			break
+		}
+		if !f.filter.accept(c) {
+			continue
+		}
+		if len(specs) > 0 || f.filter.pickaxe != "" || f.filter.grepDiff != nil {
+			var diffs []*fileDiff
+			var err error
+			if f.filter.follow && len(specs) == 1 {
+				if f.followed == nil {
+					f.followed = map[plumbing.Hash][]*fileDiff{}
+					specs = []string{specs[0]} // followDiffs updates the path
+				}
+				diffs, err = r.followDiffs(c, &specs[0])
+				f.followed[c.Hash] = diffs
+			} else {
+				diffs, err = r.commitDiffs(c, specs)
+			}
 			if err != nil {
 				return nil, err
 			}
-			if len(diffs) == 0 {
+			if (len(specs) > 0 && len(diffs) == 0) || !f.filter.acceptDiff(diffs) {
 				continue
 			}
+		}
+		if skipped < f.filter.skip {
+			skipped++
+			continue
 		}
 		out = append(out, c)
 		if f.count >= 0 && len(out) >= f.count && !f.reverse {
@@ -308,9 +453,16 @@ func (r *repo) walk(f *logFormat, specs []string) ([]*object.Commit, error) {
 // The medium format ends with a newline; the one-line formats do not.
 func (r *repo) commitText(c *object.Commit, f *logFormat) string {
 	var b strings.Builder
-	switch f.kind {
-	case "medium":
-		fmt.Fprintf(&b, "commit %s%s\n", c.Hash, r.decoration(f, c.Hash, f.decorate))
+	hash := c.Hash.String()
+	if f.abbrev {
+		hash = f.short(c.Hash)
+	}
+	mark := ""
+	if f.leftRight {
+		mark = string(f.sides[c.Hash]) + " "
+	}
+	deco := r.decoration(f, c.Hash, f.decorate)
+	merge := func() {
 		if len(c.ParentHashes) > 1 {
 			b.WriteString("Merge:")
 			for _, p := range c.ParentHashes {
@@ -318,25 +470,72 @@ func (r *repo) commitText(c *object.Commit, f *logFormat) string {
 			}
 			b.WriteString("\n")
 		}
-		fmt.Fprintf(&b, "Author: %s <%s>\nDate:   %s\n\n", c.Author.Name, c.Author.Email, gitDate(c.Author.When))
-		for _, line := range strings.Split(strings.TrimRight(c.Message, "\n"), "\n") {
-			fmt.Fprintf(&b, "    %s\n", line)
+	}
+	switch f.kind {
+	case "medium":
+		fmt.Fprintf(&b, "commit %s%s%s\n", mark, hash, deco)
+		merge()
+		fmt.Fprintf(&b, "Author: %s\nDate:   %s\n\n", ident(c.Author), formatDate(c.Author.When, f.dateMode))
+		b.WriteString(indentMessage(c.Message))
+	case "short":
+		fmt.Fprintf(&b, "commit %s%s%s\n", mark, hash, deco)
+		merge()
+		fmt.Fprintf(&b, "Author: %s\n\n", ident(c.Author))
+		b.WriteString(indentMessage(strings.SplitN(strings.TrimLeft(c.Message, "\n"), "\n\n", 2)[0]))
+	case "full":
+		fmt.Fprintf(&b, "commit %s%s%s\n", mark, hash, deco)
+		merge()
+		fmt.Fprintf(&b, "Author: %s\nCommit: %s\n\n", ident(c.Author), ident(c.Committer))
+		b.WriteString(indentMessage(c.Message))
+	case "fuller":
+		fmt.Fprintf(&b, "commit %s%s%s\n", mark, hash, deco)
+		merge()
+		fmt.Fprintf(&b, "Author:     %s\nAuthorDate: %s\nCommit:     %s\nCommitDate: %s\n\n",
+			ident(c.Author), formatDate(c.Author.When, f.dateMode), ident(c.Committer), formatDate(c.Committer.When, f.dateMode))
+		b.WriteString(indentMessage(c.Message))
+	case "raw":
+		fmt.Fprintf(&b, "commit %s%s\ntree %s\n", c.Hash, deco, c.TreeHash)
+		for _, p := range c.ParentHashes {
+			fmt.Fprintf(&b, "parent %s\n", p)
 		}
+		fmt.Fprintf(&b, "author %s %s\ncommitter %s %s\n\n", ident(c.Author), formatDate(c.Author.When, "raw"),
+			ident(c.Committer), formatDate(c.Committer.When, "raw"))
+		b.WriteString(indentMessage(c.Message))
+	case "reference":
+		fmt.Fprintf(&b, "%s (%s, %s)", f.short(c.Hash), subject(c.Message), c.Author.When.Format("2006-01-02"))
+	case "email":
+		fmt.Fprintf(&b, "From %s Mon Sep 17 00:00:00 2001\nFrom: %s\nDate: %s\nSubject: [PATCH] %s\n",
+			c.Hash, ident(c.Author), formatDate(c.Author.When, "rfc"), subject(c.Message))
+		b.WriteString("\n" + body(c.Message))
 	case "oneline", "full-oneline":
 		h := c.Hash.String()
-		if f.kind == "oneline" {
-			h = short(c.Hash)
+		if f.kind == "oneline" || f.abbrev {
+			h = f.short(c.Hash)
 		}
-		fmt.Fprintf(&b, "%s%s %s", h, r.decoration(f, c.Hash, f.decorate), subject(c.Message))
+		fmt.Fprintf(&b, "%s%s%s %s", mark, h, deco, subject(c.Message))
 	case "format", "tformat":
-		b.WriteString(expandFormat(f.template, c, r.labels(f, c.Hash)))
+		b.WriteString(mark + expandFormat(f.template, c, r.labels(f, c.Hash), f))
 	}
 	return b.String()
 }
 
+// short abbreviates h to --abbrev, 7 by default.
+func (f *logFormat) short(h plumbing.Hash) string {
+	if f != nil && f.abbrevLen >= 4 && f.abbrevLen <= 40 {
+		return h.String()[:f.abbrevLen]
+	}
+	return short(h)
+}
+
 // separated reports whether entries are separated (medium, format:) rather
 // than terminated (oneline, tformat:).
-func (f *logFormat) separated() bool { return f.kind == "medium" || f.kind == "format" }
+func (f *logFormat) separated() bool {
+	switch f.kind {
+	case "medium", "format", "short", "full", "fuller", "raw", "email":
+		return true
+	}
+	return false
+}
 
 // writeCommit prints the n-th commit of a log or show listing.
 func (r *repo) writeCommit(w io.Writer, c *object.Commit, f *logFormat, specs []string, n int) error {
@@ -357,14 +556,17 @@ func (r *repo) writeCommit(w io.Writer, c *object.Commit, f *logFormat, specs []
 	if f.kind != "oneline" && f.kind != "full-oneline" {
 		fmt.Fprintln(w)
 	}
-	writeDiffs(w, diffs, f.stat, f.patch, f.nameOnly, f.nameStat, false)
+	writeDiffs(w, diffs, f.output())
 	return nil
 }
 
 func (r *repo) logDiffs(c *object.Commit, f *logFormat, specs []string) ([]*fileDiff, error) {
 	// Like git without -m or --cc, merge commits show no diff.
-	if f.noPatch || !(f.patch || f.stat || f.nameOnly || f.nameStat) || len(c.ParentHashes) > 1 {
+	if !f.output().any() || len(c.ParentHashes) > 1 {
 		return nil, nil
+	}
+	if d, ok := f.followed[c.Hash]; ok {
+		return d, nil
 	}
 	return r.commitDiffs(c, specs)
 }
@@ -417,7 +619,7 @@ func (r *repo) writeGraphCommit(w io.Writer, c *object.Commit, f *logFormat, spe
 			b.WriteString(g.paddingLine() + "\n")
 		}
 		var d strings.Builder
-		writeDiffs(&d, diffs, f.stat, f.patch, f.nameOnly, f.nameStat, false)
+		writeDiffs(&d, diffs, f.output())
 		for _, line := range strings.SplitAfter(d.String(), "\n") {
 			if line != "" {
 				b.WriteString(g.paddingLine() + line)
@@ -429,34 +631,62 @@ func (r *repo) writeGraphCommit(w io.Writer, c *object.Commit, f *logFormat, spe
 }
 
 // writeDiffs prints the selected diff outputs in git's order.
-func writeDiffs(w io.Writer, diffs []*fileDiff, stat, patch, nameOnly, nameStat, numstat bool) {
+// diffOutput selects the diff formats to print, in git's order.
+type diffOutput struct {
+	nameOnly, nameStat, numstat, stat, shortstat, summary, patch bool
+}
+
+func (o diffOutput) any() bool {
+	return o.nameOnly || o.nameStat || o.numstat || o.stat || o.shortstat || o.summary || o.patch
+}
+
+func writeDiffs(w io.Writer, diffs []*fileDiff, o diffOutput) {
 	for _, d := range diffs {
 		switch {
-		case numstat && d.binary:
-			fmt.Fprintf(w, "-\t-\t%s\n", d.displayName())
-		case numstat:
-			fmt.Fprintf(w, "%d\t%d\t%s\n", d.added, d.deleted, d.displayName())
-		case nameStat:
+		case o.nameStat:
 			if d.oldPath != "" {
 				fmt.Fprintf(w, "R%03d\t%s\t%s\n", similarityIndex(d.score), q(d.oldPath), q(d.path))
 			} else {
 				fmt.Fprintf(w, "%c\t%s\n", changeCode(d.change), q(d.path))
 			}
-		case nameOnly:
+		case o.nameOnly:
 			fmt.Fprintln(w, q(d.path))
 		}
 	}
-	if stat {
-		writeStat(w, diffs)
+	if o.numstat {
+		for _, d := range diffs {
+			if d.binary {
+				fmt.Fprintf(w, "-\t-\t%s\n", d.displayName())
+			} else {
+				fmt.Fprintf(w, "%d\t%d\t%s\n", d.added, d.deleted, d.displayName())
+			}
+		}
 	}
-	if patch {
-		if stat {
+	if o.stat {
+		writeStat(w, diffs)
+	} else if o.shortstat {
+		writeSummary(w, diffs)
+	}
+	if o.summary {
+		writeModeSummary(w, diffs)
+	}
+	if o.patch {
+		if o.stat || o.numstat || o.shortstat || o.summary {
 			fmt.Fprintln(w)
 		}
 		for _, d := range diffs {
 			d.writePatch(w)
 		}
 	}
+}
+
+// output is the diff selection of a log format.
+func (f *logFormat) output() diffOutput {
+	if f.noPatch {
+		return diffOutput{}
+	}
+	return diffOutput{nameOnly: f.nameOnly, nameStat: f.nameStat, numstat: f.numstat, stat: f.stat,
+		shortstat: f.shortstat, summary: f.summary, patch: f.patch}
 }
 
 // labels returns the decorations of h, loading all refs on first use.
@@ -544,11 +774,12 @@ func (r *repo) peel(name plumbing.ReferenceName) (plumbing.Hash, bool) {
 	return h, true
 }
 
-func expandFormat(tmpl string, c *object.Commit, labels []string) string {
+// expandFormat expands a --format template for c.
+func expandFormat(tmpl string, c *object.Commit, labels []string, f *logFormat) string {
 	subj := subject(c.Message)
-	body := ""
-	if _, rest, ok := strings.Cut(strings.TrimLeft(c.Message, "\n"), "\n\n"); ok {
-		body = strings.TrimLeft(rest, "\n")
+	dateMode := ""
+	if f != nil {
+		dateMode = f.dateMode
 	}
 	var b strings.Builder
 	for i := 0; i < len(tmpl); i++ {
@@ -563,18 +794,27 @@ func expandFormat(tmpl string, c *object.Commit, labels []string) string {
 		}
 		sig := func(s object.Signature) bool {
 			switch two[1] {
-			case 'n':
+			case 'n', 'N':
 				b.WriteString(s.Name)
-			case 'e':
+			case 'e', 'E':
 				b.WriteString(s.Email)
+			case 'l', 'L':
+				local, _, _ := strings.Cut(s.Email, "@")
+				b.WriteString(local)
 			case 'd':
-				b.WriteString(gitDate(s.When))
+				b.WriteString(formatDate(s.When, dateMode))
+			case 'D':
+				b.WriteString(formatDate(s.When, "rfc"))
 			case 'i':
-				b.WriteString(s.When.Format("2006-01-02 15:04:05 -0700"))
+				b.WriteString(formatDate(s.When, "iso"))
 			case 'I':
-				b.WriteString(s.When.Format("2006-01-02T15:04:05-07:00"))
+				b.WriteString(formatDate(s.When, "iso-strict"))
+			case 's':
+				b.WriteString(formatDate(s.When, "short"))
+			case 'r':
+				b.WriteString(formatDate(s.When, "relative"))
 			case 't':
-				b.WriteString(strconv.FormatInt(s.When.Unix(), 10))
+				b.WriteString(formatDate(s.When, "unix"))
 			default:
 				return false
 			}
@@ -584,31 +824,62 @@ func expandFormat(tmpl string, c *object.Commit, labels []string) string {
 		case tmpl[i] == 'H':
 			b.WriteString(c.Hash.String())
 		case tmpl[i] == 'h':
-			b.WriteString(short(c.Hash))
+			b.WriteString(f.short(c.Hash))
 		case tmpl[i] == 'T':
 			b.WriteString(c.TreeHash.String())
 		case tmpl[i] == 't':
-			b.WriteString(short(c.TreeHash))
+			b.WriteString(f.short(c.TreeHash))
 		case tmpl[i] == 'P' || tmpl[i] == 'p':
 			var ps []string
 			for _, p := range c.ParentHashes {
 				if tmpl[i] == 'P' {
 					ps = append(ps, p.String())
 				} else {
-					ps = append(ps, short(p))
+					ps = append(ps, f.short(p))
 				}
 			}
 			b.WriteString(strings.Join(ps, " "))
 		case tmpl[i] == 's':
 			b.WriteString(subj)
+		case tmpl[i] == 'f':
+			b.WriteString(sanitizedSubject(subj))
 		case tmpl[i] == 'b':
-			b.WriteString(body)
+			b.WriteString(body(c.Message))
 		case tmpl[i] == 'B':
 			b.WriteString(c.Message)
+		case tmpl[i] == 'e':
+			// Encoding: empty for UTF-8 commits.
 		case tmpl[i] == 'n':
 			b.WriteByte('\n')
 		case tmpl[i] == '%':
 			b.WriteByte('%')
+		case tmpl[i] == 'm':
+			if f != nil && f.sides != nil {
+				b.WriteByte(f.sides[c.Hash])
+			} else {
+				b.WriteByte('>')
+			}
+		case tmpl[i] == 'x' && i+2 < len(tmpl):
+			if v, err := strconv.ParseUint(tmpl[i+1:i+3], 16, 8); err == nil {
+				b.WriteByte(byte(v))
+				i += 2
+			} else {
+				b.WriteString("%x")
+			}
+		case tmpl[i] == 'C':
+			// Colors are not supported; drop %C(...) and %Cname.
+			if strings.HasPrefix(tmpl[i:], "C(") {
+				if end := strings.IndexByte(tmpl[i:], ')'); end >= 0 {
+					i += end
+				}
+			} else {
+				for _, name := range []string{"reset", "red", "green", "blue"} {
+					if strings.HasPrefix(tmpl[i+1:], name) {
+						i += len(name)
+						break
+					}
+				}
+			}
 		case tmpl[i] == 'd' && len(labels) > 0:
 			b.WriteString(" (" + strings.Join(labels, ", ") + ")")
 		case tmpl[i] == 'D':
@@ -649,7 +920,7 @@ func (g *gitRun) show(args []string) error {
 		f.revs = []string{"HEAD"}
 	}
 	for n, rev := range f.revs {
-		if strings.Contains(rev, ":") {
+		if strings.Contains(rev, ":") && !strings.HasPrefix(rev, ":/") {
 			h, err := r.resolveObject(rev)
 			if err != nil {
 				return err
@@ -677,7 +948,7 @@ func (g *gitRun) show(args []string) error {
 }
 
 func (g *gitRun) diff(args []string) error {
-	var cached, stat, nameOnly, nameStat, numstat, quiet, exitCode, noRenames bool
+	var cached, stat, nameOnly, nameStat, numstat, quiet, exitCode, noRenames, shortstat, summary bool
 	var revs, paths []string
 	for i := 0; i < len(args); i++ {
 		switch a := args[i]; a {
@@ -694,6 +965,10 @@ func (g *gitRun) diff(args []string) error {
 			nameStat = true
 		case "--numstat":
 			numstat = true
+		case "--shortstat":
+			shortstat = true
+		case "--summary":
+			summary = true
 		case "--quiet":
 			quiet, exitCode = true, true
 		case "--exit-code":
@@ -715,6 +990,24 @@ func (g *gitRun) diff(args []string) error {
 	// Leading arguments that resolve are revisions; the rest are paths.
 	var commits []*object.Commit
 	for len(revs) > 0 && len(commits) < 2 {
+		if a, b, ok := strings.Cut(revs[0], "..."); ok && len(commits) == 0 {
+			// A...B compares the merge base of A and B with B.
+			ca, err := r.resolveCommit(defaultHead(a))
+			if err != nil {
+				return err
+			}
+			cb, err := r.resolveCommit(defaultHead(b))
+			if err != nil {
+				return err
+			}
+			base, err := r.mergeBase(ca.Hash, cb.Hash)
+			if err != nil || base == nil {
+				return fatalf("%s: no merge base", revs[0])
+			}
+			commits = append(commits, base, cb)
+			revs = revs[1:]
+			break
+		}
 		if a, b, ok := strings.Cut(revs[0], ".."); ok && len(commits) == 0 {
 			ca, err := r.resolveCommit(defaultHead(a))
 			if err != nil {
@@ -728,7 +1021,7 @@ func (g *gitRun) diff(args []string) error {
 			revs = revs[1:]
 			break
 		}
-		if _, err := r.ResolveRevision(plumbing.Revision(revs[0])); err != nil {
+		if _, err := r.resolveRev(revs[0]); err != nil {
 			break
 		}
 		c, err := r.resolveCommit(revs[0])
@@ -799,8 +1092,9 @@ func (g *gitRun) diff(args []string) error {
 		return err
 	}
 	if !quiet {
-		patch := !stat && !nameOnly && !nameStat && !numstat
-		writeDiffs(g.out, diffs, stat, patch, nameOnly, nameStat, numstat)
+		patch := !stat && !nameOnly && !nameStat && !numstat && !shortstat && !summary
+		writeDiffs(g.out, diffs, diffOutput{nameOnly: nameOnly, nameStat: nameStat, numstat: numstat, stat: stat,
+			shortstat: shortstat, summary: summary, patch: patch})
 	}
 	if exitCode && len(diffs) > 0 {
 		return failf(1, "")
@@ -823,6 +1117,9 @@ func mustRepoPath(r *repo, p string) string {
 // resolveObject resolves any object name: revisions, "rev:path",
 // "rev^{tree}", annotated tag names, and full hashes.
 func (r *repo) resolveObject(spec string) (plumbing.Hash, error) {
+	if strings.HasPrefix(spec, ":/") {
+		return r.resolveRev(spec)
+	}
 	if rev, p, ok := strings.Cut(spec, ":"); ok {
 		c, err := r.resolveCommit(defaultHead(rev))
 		if err != nil {
@@ -864,11 +1161,7 @@ func (r *repo) resolveObject(spec string) (plumbing.Hash, error) {
 	if ref, err := r.Storer.Reference(plumbing.NewTagReferenceName(spec)); err == nil {
 		return ref.Hash(), nil
 	}
-	h, err := r.ResolveRevision(plumbing.Revision(spec))
-	if err != nil {
-		return plumbing.ZeroHash, errAmbiguous(spec)
-	}
-	return *h, nil
+	return r.resolveRev(spec)
 }
 
 // printObject writes an object like cat-file -p; blobs are written raw.
@@ -970,7 +1263,9 @@ func (g *gitRun) revParse(args []string) error {
 					}
 					return fatalf("Needed a single revision")
 				}
-				fmt.Fprintln(g.out, a)
+				if strings.Contains(err.Error(), "ambiguous argument") {
+					fmt.Fprintln(g.out, a)
+				}
 				return err
 			}
 			if shortHash {

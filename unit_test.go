@@ -105,6 +105,16 @@ func TestHunks(t *testing.T) {
 	}
 }
 
+func TestShellAliasRefused(t *testing.T) {
+	var out strings.Builder
+	code, err := Run(context.Background(), Options{
+		Args: []string{"-c", "alias.hi=!echo hi", "hi"}, Stdout: &out, Stderr: &out,
+	})
+	if err != nil || code != 128 || !strings.Contains(out.String(), "shell alias 'hi' cannot run") {
+		t.Fatalf("shell alias: %d %v %q", code, err, out.String())
+	}
+}
+
 func TestHelp(t *testing.T) {
 	run := func(args ...string) (int, string) {
 		var out strings.Builder

@@ -1048,8 +1048,8 @@ func (g *gitRun) pull(args []string) error {
 		return err
 	}
 	if head != nil && !r.isAncestor(head.Hash, tip) && !r.isAncestor(tip, head.Hash) {
-		pullFF, _ := configGet(mustConfig(r), "pull.ff")
-		pullRebase, hasRebase := configGet(mustConfig(r), "pull.rebase")
+		pullFF, _ := r.g.configLookup("pull.ff", r.localConfig())
+		pullRebase, hasRebase := r.g.configLookup("pull.rebase", r.localConfig())
 		if ffOnly || pullFF == "only" {
 			return failf(128, "hint: Diverging branches can't be fast-forwarded, you need to either:\n"+
 				"hint:\nhint: \tgit merge --no-ff\nhint:\nhint: or:\nhint:\nhint: \tgit rebase\nhint:\n"+
