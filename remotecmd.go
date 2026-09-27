@@ -600,9 +600,7 @@ func (g *gitRun) clone(args []string) error {
 		return err
 	}
 	if len(adv.refs) == 0 {
-		if !quiet {
-			fmt.Fprintln(g.err, "warning: You appear to have cloned an empty repository.")
-		}
+		fmt.Fprintln(g.err, "warning: You appear to have cloned an empty repository.")
 	}
 	if !bare && head != "" {
 		if tip, ok := adv.refs[head]; ok {
@@ -986,7 +984,7 @@ func deniedCurrentBranch(updates []refUpdate, rejected map[plumbing.ReferenceNam
 // Pulling
 
 func (g *gitRun) pull(args []string) error {
-	var ffOnly, noRebase, quiet bool
+	var ffOnly, noRebase, quiet, rebase bool
 	var rest []string
 	for _, a := range args {
 		switch a {
@@ -997,7 +995,7 @@ func (g *gitRun) pull(args []string) error {
 		case "-q", "--quiet":
 			quiet = true
 		case "-r", "--rebase":
-			return fatalf("pull --rebase is not supported by this git")
+			rebase = true
 		default:
 			if strings.HasPrefix(a, "-") {
 				return usagef("error: unknown option `%s'", strings.TrimLeft(a, "-"))
@@ -1060,6 +1058,13 @@ func (g *gitRun) pull(args []string) error {
 	if err != nil {
 		return err
 	}
+	if pr, _ := r.g.configLookup("pull.rebase", r.localConfig()); (rebase || pr == "true") && !noRebase && head != nil {
+		if r.isAncestor(tip, head.Hash) {
+			fmt.Fprintln(g.out, "Current branch "+current+" is up to date.")
+			return nil
+		}
+		return r.startRebase(tip.String(), "", quiet)
+	}
 	if head != nil && !r.isAncestor(head.Hash, tip) && !r.isAncestor(tip, head.Hash) {
 		pullFF, _ := r.g.configLookup("pull.ff", r.localConfig())
 		pullRebase, hasRebase := r.g.configLookup("pull.rebase", r.localConfig())
@@ -1082,9 +1087,7 @@ func (g *gitRun) pull(args []string) error {
 				"hint: invocation.\n"+
 				"fatal: Need to specify how to reconcile divergent branches.\n")
 		}
-		if pullRebase == "true" {
-			return fatalf("pull --rebase is not supported by this git")
-		}
+		_ = pullRebase
 		return r.threeWayMerge(target, "Merge branch '"+merge.Short()+"' of "+displayURL(ep.url), mergeOptions{label: shortRef(r.trackingRef(remoteName, merge)), quiet: quiet, action: g.reflogAction})
 	}
 	return r.fastForward(head, target, quiet, g.reflogAction)

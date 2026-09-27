@@ -18,7 +18,7 @@ var helpGroups = []struct {
 	{"start a working area", []string{"clone", "init"}},
 	{"work on the current change", []string{"add", "mv", "restore", "rm", "stash"}},
 	{"examine the history and state", []string{"diff", "log", "show", "status"}},
-	{"grow, mark and tweak your common history", []string{"branch", "cherry-pick", "commit", "merge", "reset", "revert", "switch", "tag"}},
+	{"grow, mark and tweak your common history", []string{"branch", "cherry-pick", "commit", "merge", "rebase", "reset", "revert", "switch", "tag"}},
 	{"collaborate", []string{"fetch", "pull", "push"}},
 }
 
@@ -104,6 +104,8 @@ var help = map[string]commandHelp{
 		[]string{"git stash [push [-k] [-u | -a] [-q] [-m <message>] [--] [<pathspec>...]]", "git stash list",
 			"git stash show [-p] [-u] [<stash>]", "git stash (pop | apply) [--index] [-q] [<stash>]",
 			"git stash drop [-q] [<stash>]", "git stash branch <branchname> [<stash>]", "git stash clear"}, nil},
+	"rebase": {"Reapply commits on top of another base tip",
+		[]string{"git rebase [-q] [--onto <newbase>] [<upstream> [<branch>]]", "git rebase (--continue | --skip | --abort)"}, nil},
 	"reflog": {"Manage reflog information",
 		[]string{"git reflog [show] [<log-options>] [<ref>]", "git reflog exists <ref>"}, nil},
 	"merge-base": {"Find as good common ancestors as possible for a merge",

@@ -335,7 +335,11 @@ func (r *repo) listBranches(current string, local, remote bool, verbose int) err
 	var items []item
 	if local && current == "" {
 		if head, err := r.headCommit(); err == nil && head != nil {
-			items = append(items, item{label: "(HEAD detached at " + short(head.Hash) + ")", hash: head.Hash, current: true})
+			label := "(HEAD detached at " + short(head.Hash) + ")"
+			if rb := r.loadRebase(); rb != nil {
+				label = "(no branch, rebasing " + strings.TrimPrefix(rb.headName, "refs/heads/") + ")"
+			}
+			items = append(items, item{label: label, hash: head.Hash, current: true})
 		}
 	}
 	iter, err := r.Storer.IterReferences()

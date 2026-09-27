@@ -956,6 +956,105 @@ git stash show -p
 git stash clear
 git stash list
 `},
+	{"rebase", `
+git init -q -b main
+printf '1\n2\n3\n' > f
+git add f
+git commit -qm base
+git checkout -qb feature
+echo a > a
+git add a
+git commit -qm "add a"
+echo b > b
+git add b
+git commit -qm "add b"
+git checkout -q main
+echo m > m
+git add m
+git commit -qm "add m"
+git rebase main
+git rebase main feature
+git checkout -q feature
+git rebase main
+git log --oneline --graph --all
+git reflog -6
+git checkout -q main
+printf '1\nMAIN\n3\n' > f
+git commit -qam "main f"
+git checkout -q feature
+printf '1\nFEAT\n3\n' > f
+git commit -qam "feat f"
+echo c > c
+git add c
+git commit -qm "add c"
+git rebase main
+git status
+git status -s
+git branch
+cat .git/rebase-merge/done .git/rebase-merge/git-rebase-todo
+git rebase main
+GIT_EDITOR=true git rebase --continue
+echo resolved > f
+git add f
+git status
+GIT_EDITOR=true git rebase --continue
+git log --oneline -6
+git reflog -8
+git status
+`},
+	{"rebase abort, skip, onto", `
+git init -q -b main
+printf '1\n2\n3\n' > f
+git add f
+git commit -qm base
+git checkout -qb topic
+printf '1\nTOPIC\n3\n' > f
+git commit -qam "topic f"
+echo t > t
+git add t
+git commit -qm "add t"
+git checkout -q main
+printf '1\nMAIN\n3\n' > f
+git commit -qam "main f"
+git checkout -q topic
+git rebase main
+git rebase --abort
+git status -sb
+git log --oneline -3
+git rebase main
+git rebase --skip
+git log --oneline -3
+git checkout -q -b onto-test main
+echo o > o
+git add o
+git commit -qm "add o"
+git rebase --onto HEAD~1 HEAD~1 topic
+git log --oneline -3
+git rebase --continue
+git checkout -q main
+git cherry-pick topic
+git checkout -q -b dup main~1
+git cherry-pick main
+echo d > d
+git add d
+git commit -qm "add d"
+git rebase main
+git log --oneline -4
+`},
+	{"pull --rebase", `
+git init -q --bare -b main server.git
+git clone -q server.git one
+cd one && echo a > a && git add a && git commit -qm a && git push -q -u origin main
+git clone -q server.git two
+cd one && echo b > b && git add b && git commit -qm b && git push -q
+cd two && echo c > c && git add c && git commit -qm c
+cd two && git pull --rebase
+cd two && git log --oneline
+cd two && git pull --rebase
+cd two && git config pull.rebase true && git push -q
+cd one && echo d > d && git add d && git commit -qm d && git pull
+cd one && git log --oneline
+`},
 }
 
 func TestCompatibility(t *testing.T) {
@@ -970,6 +1069,12 @@ func TestCompatibility(t *testing.T) {
 			got := transcript(t, ourGit, sc.script)
 			if got != want {
 				t.Errorf("transcripts differ\n%s", lineDiff(want, got))
+				// GOGIT_DUMP=<dir> keeps both transcripts for diffing.
+				if dir := os.Getenv("GOGIT_DUMP"); dir != "" {
+					name := strings.ReplaceAll(sc.name, " ", "_")
+					os.WriteFile(filepath.Join(dir, name+".want"), []byte(want), 0644)
+					os.WriteFile(filepath.Join(dir, name+".got"), []byte(got), 0644)
+				}
 			}
 		})
 	}
@@ -1018,12 +1123,12 @@ func lineDiff(want, got string) string {
 	start := max(i-6, 0)
 	var b strings.Builder
 	b.WriteString("--- real git\n")
-	for _, l := range w[start:min(i+12, len(w))] {
-		b.WriteString("  " + l + "\n")
+	for _, l := range w[start:min(i+25, len(w))] {
+		b.WriteString("  " + l + "$\n") // "$" marks the line end
 	}
 	b.WriteString("--- go-git\n")
-	for _, l := range g[start:min(i+12, len(g))] {
-		b.WriteString("  " + l + "\n")
+	for _, l := range g[start:min(i+25, len(g))] {
+		b.WriteString("  " + l + "$\n")
 	}
 	return b.String()
 }

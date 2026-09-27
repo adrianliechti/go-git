@@ -81,7 +81,7 @@ Known differences from git:
 
 - Merges follow merge-ort's per-path rules and xdiff's conflict output, but
   without rename detection across branches or recursive merge bases.
-- No `rebase`, `blame`, or `grep` yet; `stash -p` needs a terminal.
+- No `blame` or `grep` yet; `rebase -i`, `add -p`, and `stash -p` need an editor or terminal.
 - No editor, pager, hooks, or colors; `-m`/`-F` are required for messages.
 - Diffs use Myers with git's slide-down compaction but without the indent
   heuristic, so hunk placement can differ for indented code.

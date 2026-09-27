@@ -738,6 +738,11 @@ func ident(s object.Signature) string { return s.Name + " <" + s.Email + ">" }
 // writeLongStatus prints git status output; commit uses slightly different
 // wording for an unborn branch.
 func (r *repo) writeLongStatus(w io.Writer, st *repoStatus, forCommit bool) {
+	if rb := r.loadRebase(); rb != nil {
+		r.writeRebaseStatus(w, rb, st.hasUnmerged())
+		r.writeStatusBody(w, st, forCommit)
+		return
+	}
 	if st.branch == "" {
 		fmt.Fprintf(w, "HEAD detached at %s\n", short(st.head.Hash))
 	} else {
@@ -749,6 +754,11 @@ func (r *repo) writeLongStatus(w io.Writer, st *repoStatus, forCommit bool) {
 		}
 	}
 	r.writeOperationState(w, st)
+	r.writeStatusBody(w, st, forCommit)
+}
+
+// writeStatusBody writes the sections after the branch and state header.
+func (r *repo) writeStatusBody(w io.Writer, st *repoStatus, forCommit bool) {
 	if st.head == nil {
 		if forCommit {
 			fmt.Fprint(w, "\nInitial commit\n\n")
@@ -901,6 +911,7 @@ func (r *repo) switchBranch(name string, create bool, start string, detach bool,
 		}
 	}
 	if isBranch && name == current && !create {
+		r.appendReflog(plumbing.HEAD, target.Hash, target.Hash, "checkout: moving from "+name+" to "+name)
 		if !quiet {
 			fmt.Fprintf(g.err, "Already on '%s'\n", name)
 		}
@@ -913,7 +924,9 @@ func (r *repo) switchBranch(name string, create bool, start string, detach bool,
 		return err
 	}
 	msg := "checkout: moving from " + r.headName() + " to " + name
-	if isBranch {
+	if r.quietCheckout && isBranch {
+		err = r.Storer.SetReference(plumbing.NewSymbolicReference(plumbing.HEAD, ref))
+	} else if isBranch {
 		err = r.pointHead(ref, plumbing.ZeroHash, msg)
 	} else {
 		err = r.pointHead("", target.Hash, msg)

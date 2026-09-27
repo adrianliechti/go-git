@@ -256,6 +256,7 @@ var commands = map[string]func(*gitRun, []string) error{
 	"hash-object": (*gitRun).hashObject,
 	"reflog":      (*gitRun).reflogCmd,
 	"stash":       (*gitRun).stash,
+	"rebase":      (*gitRun).rebase,
 	"version":     (*gitRun).version,
 	"mv":          (*gitRun).mv,
 	"clean":       (*gitRun).clean,
@@ -272,7 +273,7 @@ var commands = map[string]func(*gitRun, []string) error{
 // Commands that real git has but this implementation deliberately omits.
 var unsupported = []string{
 	"am", "apply", "bisect", "blame", "gc", "grep", "notes",
-	"rebase", "submodule", "worktree",
+	"submodule", "worktree",
 }
 
 func (g *gitRun) main(args []string) int {
@@ -404,6 +405,9 @@ type repo struct {
 	top    string   // absolute path of the worktree root, or of a bare repository
 	gitDir string   // absolute path of the git directory
 	prefix string   // cwd relative to top, "" or ending in "/"
+	// quietCheckout switches branches without a reflog entry, as rebase
+	// does when given a branch to rebase.
+	quietCheckout bool
 }
 
 func (r *repo) bare() bool { return r.wt == nil }
