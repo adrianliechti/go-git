@@ -1055,6 +1055,122 @@ cd two && git config pull.rebase true && git push -q
 cd one && echo d > d && git add d && git commit -qm d && git pull
 cd one && git log --oneline
 `},
+	{"inspection tools", `
+git init -q -b main
+mkdir d
+printf 'one\ntwo\nthree\n' > f
+echo x > d/x
+git add .
+git commit -qm first
+GIT_AUTHOR_NAME="Bob Long" git tag -a v1 -m v1
+printf 'one\nTWO\nthree\nfour\n' > f
+GIT_AUTHOR_NAME="Bob Long" GIT_AUTHOR_DATE="@1700100000 +0000" git commit -qam second
+git tag light
+echo y > d/y
+git add d
+git commit -qm third
+git blame f
+git blame -L 2,3 f
+git blame -s f
+git blame -e f
+git blame HEAD~2 f
+git describe
+git describe --tags
+git describe --long v1
+git describe --always HEAD
+git describe HEAD~2
+echo z >> f
+git describe --dirty
+git checkout -q f
+git describe --abbrev=4
+git shortlog HEAD
+git shortlog -s -n HEAD
+git shortlog -sne HEAD
+git grep -n t
+git grep -c o
+git grep -l x
+git grep -i TWO
+git grep "t.o"
+git grep -e one --or -e four
+git grep "\(one\|four\)"
+git grep -E "one|four"
+git grep -w "tw"
+git grep one HEAD~2
+git grep nomatch
+git grep -h -n f -- f
+`},
+	{"plumbing", `
+git init -q -b main
+mkdir d
+echo x > d/x
+printf 'one\ntwo\n' > f
+git add .
+git commit -qm first
+git tag -a v1 -m v1
+echo y > d/y
+git add d
+git commit -qm second
+git ls-tree HEAD
+git ls-tree -r HEAD
+git ls-tree -r -t HEAD
+git ls-tree -l HEAD
+git ls-tree --name-only HEAD d
+git ls-tree HEAD d/
+git ls-tree -d HEAD
+git show-ref
+git show-ref --tags -d
+git show-ref --heads -s
+git show-ref main
+git show-ref --verify refs/heads/main
+git show-ref --verify main
+git for-each-ref
+git for-each-ref --format="%(refname:short) %(objectname:short) %(subject)" refs/heads refs/tags
+git for-each-ref --sort=-refname --count=1 --format="%(refname)"
+git for-each-ref --format="%(HEAD)%(refname:short)|%(authorname)|%(committerdate:short)|%(objecttype)" refs/heads
+git rev-list HEAD
+git rev-list --count HEAD
+git rev-list --reverse --parents HEAD
+git rev-list HEAD~1..HEAD
+git rev-list --objects HEAD~1..HEAD
+git diff-tree HEAD
+git diff-tree -r HEAD~1 HEAD
+git diff-tree --no-commit-id --name-only -r HEAD
+git diff-tree -p HEAD~1 HEAD
+git diff-tree --root -r HEAD~1
+git symbolic-ref HEAD
+git symbolic-ref --short HEAD
+git symbolic-ref v1
+git write-tree
+echo new > n
+git update-index n
+git update-index --add n
+git write-tree
+git ls-files -s n
+git update-index --cacheinfo 100644,d95f3ad14dee633a758d2e331151e950dd13e4ed,cached.txt
+git update-index --add --cacheinfo 100644,d95f3ad14dee633a758d2e331151e950dd13e4ed,cached.txt
+git ls-files -s cached.txt
+git update-index --force-remove cached.txt
+git ls-files
+TREE=$(git write-tree) && echo "commit message" | git commit-tree $TREE -p HEAD
+TREE=$(git write-tree) && git commit-tree $TREE -m "with -m" -p HEAD
+git update-ref refs/heads/other HEAD~1
+git show-ref other
+git update-ref -d refs/heads/other
+git show-ref other
+git read-tree --prefix=copy/ HEAD~1
+git ls-files
+git read-tree HEAD
+git ls-files
+git ls-remote .
+printf 'a\nb\nc\n' > base.txt
+printf 'a\nB\nc\n' > ours.txt
+printf 'a\nb\nC\n' > theirs.txt
+git merge-file -p ours.txt base.txt theirs.txt
+printf 'a\nX\nc\n' > theirs.txt
+git merge-file -p ours.txt base.txt theirs.txt
+git merge-file -L mine -L base -L yours ours.txt base.txt theirs.txt
+cat ours.txt
+`},
 }
 
 func TestCompatibility(t *testing.T) {

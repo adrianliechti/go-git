@@ -73,6 +73,12 @@ func equalLines(a []string, i int, b []string, j, n int) bool {
 // merge3 merges ours and theirs against base. It returns the merged lines
 // joined, and whether any conflict remains.
 func merge3(base, ours, theirs []byte, oursLabel, theirsLabel string) ([]byte, bool) {
+	out, n := merge3Count(base, ours, theirs, oursLabel, theirsLabel)
+	return out, n > 0
+}
+
+// merge3Count is merge3 returning the number of conflicts.
+func merge3Count(base, ours, theirs []byte, oursLabel, theirsLabel string) ([]byte, int) {
 	b, o, t := splitLines(base), splitLines(ours), splitLines(theirs)
 	x1, x2 := diffHunks(b, o), diffHunks(b, t)
 	var ms []mergeHunk
@@ -127,7 +133,7 @@ func merge3(base, ours, theirs []byte, oursLabel, theirsLabel string) ([]byte, b
 	ms = simplifyNonConflicts(ms)
 
 	var out strings.Builder
-	conflict := false
+	conflicts := 0
 	copyLines := func(lines []string, from, n int, addNL bool) {
 		for k := from; k < from+n; k++ {
 			out.WriteString(lines[k])
@@ -140,7 +146,7 @@ func merge3(base, ours, theirs []byte, oursLabel, theirsLabel string) ([]byte, b
 	for _, m := range ms {
 		switch {
 		case m.mode == 0:
-			conflict = true
+			conflicts++
 			copyLines(o, i, m.i1-i, false)
 			out.WriteString("<<<<<<< " + oursLabel + "\n")
 			copyLines(o, m.i1, m.chg1, true)
@@ -161,7 +167,7 @@ func merge3(base, ours, theirs []byte, oursLabel, theirsLabel string) ([]byte, b
 		i = m.i1 + m.chg1
 	}
 	copyLines(o, i, len(o)-i, false)
-	return []byte(out.String()), conflict
+	return []byte(out.String()), conflicts
 }
 
 // refineConflicts splits each conflict by diffing its two sides, so lines

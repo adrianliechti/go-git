@@ -71,17 +71,22 @@ go test ./...
 ```
 
 Supported commands: `init`, `clone`, `add`, `mv`, `rm`, `restore`, `clean`,
-`commit`, `status`, `log`, `show`, `diff`, `branch`, `checkout`, `switch`,
-`reset`, `merge`, `merge-base`, `cherry-pick`, `revert`, `tag`, `remote`,
-`fetch`, `pull`, `push`, `config`,
-`rev-parse`, `cat-file`, `ls-files`, `hash-object`, `help`, `version`. Only the
-common options of each are implemented; `git help <command>` lists them.
+`stash`, `commit`, `status`, `log`, `show`, `diff`, `grep`, `blame`,
+`shortlog`, `describe`, `branch`, `checkout`, `switch`, `reset`, `merge`,
+`rebase`, `cherry-pick`, `revert`, `tag`, `remote`, `fetch`, `pull`, `push`,
+`ls-remote`, `reflog`, `config`, `help`, `version`, and the plumbing commands
+`rev-parse`, `rev-list`, `cat-file`, `hash-object`, `ls-files`, `ls-tree`,
+`show-ref`, `for-each-ref`, `update-ref`, `symbolic-ref`, `write-tree`,
+`commit-tree`, `read-tree`, `update-index`, `diff-tree`, `merge-base`,
+`merge-file`, and `count-objects`. Only the common options of each are
+implemented; `git help <command>` lists them.
 
 Known differences from git:
 
 - Merges follow merge-ort's per-path rules and xdiff's conflict output, but
   without rename detection across branches or recursive merge bases.
-- No `blame` or `grep` yet; `rebase -i`, `add -p`, and `stash -p` need an editor or terminal.
+- `rebase -i`, `add -p`, and `stash -p` need an editor or terminal.
+- `blame` follows first parents only (no `-C`/`-M` copy detection).
 - No editor, pager, hooks, or colors; `-m`/`-F` are required for messages.
 - Diffs use Myers with git's slide-down compaction but without the indent
   heuristic, so hunk placement can differ for indented code.
